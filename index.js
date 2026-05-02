@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import http from "http";
 
@@ -1030,38 +1031,48 @@ const createServer = () => {
   return server;
 };
 
-// ── HTTP Server ──
-const httpServer = http.createServer(async (req, res) => {
-  if (req.method === "GET" && req.url === "/") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      name: "mcp-europe-business",
-      version: "1.0.0",
-      description: "European business compliance suite for AI agents",
-      tools_count: 28,
-      modules: {
-        validation: ["validate_nif", "validate_iban", "get_vat_rate", "get_portugal_holidays", "get_spain_holidays", "get_france_holidays", "validate_nif_es", "validate_siret", "validate_tva_fr", "calculate_working_days", "format_number_european", "validate_codice_fiscale", "validate_partita_iva", "validate_vat_de", "validate_vat_uk", "validate_kvk_nl", "validate_postal_code"],
-        business_rules: ["get_payment_terms", "get_invoice_requirements", "get_vat_exemption_threshold", "get_einvoicing_rules"],
-        labor_helpers: ["get_public_holidays_range", "calculate_working_days_eu", "get_next_payment_date"],
-        invoice_vat: ["validate_invoice_schema", "calculate_vat_breakdown", "suggest_vat_treatment", "calculate_vat_amount"]
-      },
-      mcp_endpoint: "/mcp"
-    }));
-    return;
-  }
-  if (req.url === "/mcp") {
-    const server = createServer();
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on("close", () => { transport.close(); server.close(); });
-    await server.connect(transport);
-    await transport.handleRequest(req, res);
-    return;
-  }
-  res.writeHead(404);
-  res.end("Not found");
-});
+// ── Dual Transport: stdio (Glama/local) or HTTP (Railway/production) ──
+const isStdio = !process.env.PORT && !process.stdin.isTTY;
 
-const PORT = process.env.PORT || 8080;
-httpServer.listen(PORT, () => {
-  console.log(`MCP Europe Business Suite running on port ${PORT}`);
-});
+if (isStdio) {
+  // Stdio mode — used by Glama safety checks and local MCP clients
+  const server = createServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+} else {
+  // HTTP mode — used by Railway, MCPize, Smithery
+  const httpServer = http.createServer(async (req, res) => {
+    if (req.method === "GET" && req.url === "/") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        name: "mcp-europe-business",
+        version: "1.1.0",
+        description: "European business compliance suite for AI agents",
+        tools_count: 28,
+        modules: {
+          validation: ["validate_nif", "validate_iban", "get_vat_rate", "get_portugal_holidays", "get_spain_holidays", "get_france_holidays", "validate_nif_es", "validate_siret", "validate_tva_fr", "calculate_working_days", "format_number_european", "validate_codice_fiscale", "validate_partita_iva", "validate_vat_de", "validate_vat_uk", "validate_kvk_nl", "validate_postal_code"],
+          business_rules: ["get_payment_terms", "get_invoice_requirements", "get_vat_exemption_threshold", "get_einvoicing_rules"],
+          labor_helpers: ["get_public_holidays_range", "calculate_working_days_eu", "get_next_payment_date"],
+          invoice_vat: ["validate_invoice_schema", "calculate_vat_breakdown", "suggest_vat_treatment", "calculate_vat_amount"]
+        },
+        mcp_endpoint: "/mcp"
+      }));
+      return;
+    }
+    if (req.url === "/mcp") {
+      const server = createServer();
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      res.on("close", () => { transport.close(); server.close(); });
+      await server.connect(transport);
+      await transport.handleRequest(req, res);
+      return;
+    }
+    res.writeHead(404);
+    res.end("Not found");
+  });
+
+  const PORT = process.env.PORT || 8080;
+  httpServer.listen(PORT, () => {
+    console.log(`MCP Europe Business Suite running on port ${PORT}`);
+  });
+}
