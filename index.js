@@ -18,25 +18,28 @@ const createServer = () => {
   server.registerTool("validate_nif", {
     description: "Validates a Portuguese NIF (Número de Identificação Fiscal) — the 9-digit tax identification number issued by the Portuguese Tax Authority (AT) to individuals and companies. Applies the official modulo-11 checksum algorithm to verify the check digit. Returns { valid: true, nif: string } for valid NIFs, or { valid: false, reason: string } for invalid format or failed checksum. First-digit rules are enforced: 1–3 for individuals, 5 for corporations, 6 for public entities, 7–8 for other entities, 9 for occasional taxpayers. Use when processing Portuguese invoices (faturas), onboarding suppliers, validating user registrations, or any fiscal compliance workflow. Does not query the AT database — offline format and checksum validation only.",
     inputSchema: { nif: z.string().describe("9-digit Portuguese NIF, with or without spaces. Example: '123456789'") },
+    outputSchema: { valid: z.boolean().describe("Whether the NIF is valid"), nif: z.string().optional().describe("Normalized NIF without spaces"), reason: z.string().optional().describe("Reason for invalidity if valid is false") },
     annotations: { title: "Validate Portuguese NIF", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ nif }) => {
     const clean = nif.replace(/\s/g, "");
-    if (!/^\d{9}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "NIF must have exactly 9 digits" }) }] };
+    if (!/^\d{9}$/.test(clean)) { const r = { valid: false, reason: "NIF must have exactly 9 digits" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     const validFirst = [1,2,3,5,6,7,8,9];
-    if (!validFirst.includes(parseInt(clean[0]))) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "Invalid first digit" }) }] };
+    if (!validFirst.includes(parseInt(clean[0]))) { const r = { valid: false, reason: "Invalid first digit" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     let sum = 0;
     for (let i = 0; i < 8; i++) sum += parseInt(clean[i]) * (9 - i);
     const remainder = sum % 11;
     const checkDigit = remainder < 2 ? 0 : 11 - remainder;
     const valid = checkDigit === parseInt(clean[8]);
-    return { content: [{ type: "text", text: JSON.stringify({ valid, nif: clean }) }] };
+    const r = { valid, nif: clean };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 2. Validate IBAN ──
   server.registerTool("validate_iban", {
     description: "Validates an IBAN (International Bank Account Number) using the ISO 13616 MOD-97 algorithm. Supports 18 European countries: PT, ES, FR, DE, IT, NL, BE, PL, SE, DK, FI, AT, IE, GR, HU, RO, CZ, HR. Returns { valid: boolean, country: string, iban: string } — country is extracted from the 2-letter prefix. Returns { valid: false, reason: string } for malformed input. Spaces are automatically stripped before validation. Use when validating supplier bank details for SEPA transfers, processing direct debit mandates, verifying payment data in e-commerce checkouts, or any workflow requiring a verified EU bank account number. Validates structure and checksum only — does not confirm account existence.",
     inputSchema: { iban: z.string().describe("European IBAN with or without spaces. Example: 'PT50 0002 0123 1234 5678 9015 4'") },
-    annotations: { title: "Validate IBAN", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), country: z.string().optional(), iban: z.string().optional(), reason: z.string().optional() },
+        annotations: { title: "Validate IBAN", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ iban }) => {
     const clean = iban.replace(/\s/g, "").toUpperCase();
     if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "Invalid IBAN format" }) }] };
@@ -52,7 +55,8 @@ const createServer = () => {
   server.registerTool("get_vat_rate", {
     description: "Returns all VAT (Value Added Tax) rates for a given EU country — standard, reduced, intermediate, and super-reduced rates where applicable, as numeric percentages. Returns { country, standard, reduced?, intermediate?, superreduced? } for supported countries, or { error, available } listing all valid codes if the country is not found. Supports 18 EU member states: PT, ES, FR, DE, IT, NL, BE, PL, SE, DK, FI, AT, IE, GR, HU, RO, CZ, HR. Use when calculating EU cross-border invoice tax, determining correct rate for e-commerce checkout by customer country, generating compliant VAT breakdowns, or any workflow requiring accurate and current EU VAT rates per jurisdiction.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO 3166-1 alpha-2 country code. Example: 'PT', 'FR', 'DE'") },
-    annotations: { title: "Get EU VAT Rate", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { country: z.string().optional(), standard: z.number().optional(), reduced: z.number().optional(), intermediate: z.number().optional(), superreduced: z.number().optional(), error: z.string().optional() },
+        annotations: { title: "Get EU VAT Rate", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const rates = {
       PT: { standard: 23, intermediate: 13, reduced: 6, country: "Portugal" },
@@ -85,7 +89,8 @@ const createServer = () => {
   server.registerTool("get_portugal_holidays", {
     description: "Returns all Portuguese national public holidays for a given year as a structured list. Each holiday includes { date: 'YYYY-MM-DD', name: string, name_en: string }. Returns 10 mandatory national holidays defined by Portuguese law. Use when calculating business deadlines, delivery dates, payment due dates, SLA periods, or scheduling tasks that must avoid non-working days in Portugal.",
     inputSchema: { year: z.number().describe("Calendar year as a 4-digit integer. Example: 2026") },
-    annotations: { title: "Get Portugal Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { year: z.number(), country: z.string(), total_holidays: z.number(), holidays: z.array(z.object({ date: z.string(), name: z.string(), name_en: z.string() })) },
+        annotations: { title: "Get Portugal Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ year }) => {
     const holidays = [
       { date: `${year}-01-01`, name: "Ano Novo", name_en: "New Year's Day" },
@@ -106,7 +111,8 @@ const createServer = () => {
   server.registerTool("get_spain_holidays", {
     description: "Returns all Spanish national public holidays for a given year as a structured list. Each holiday includes { date: 'YYYY-MM-DD', name: string, name_en: string }. Returns 9 mandatory national holidays defined by Spanish law. Does not include regional holidays that vary by autonomous community.",
     inputSchema: { year: z.number().describe("Calendar year as a 4-digit integer. Example: 2026") },
-    annotations: { title: "Get Spain Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { year: z.number(), country: z.string(), total_holidays: z.number(), holidays: z.array(z.object({ date: z.string(), name: z.string(), name_en: z.string() })) },
+        annotations: { title: "Get Spain Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ year }) => {
     const holidays = [
       { date: `${year}-01-01`, name: "Año Nuevo", name_en: "New Year's Day" },
@@ -126,7 +132,8 @@ const createServer = () => {
   server.registerTool("get_france_holidays", {
     description: "Returns all French national public holidays for a given year. Easter-dependent holidays (Easter Monday, Ascension, Whit Monday) are dynamically calculated using the Anonymous Gregorian algorithm. Returns 11 mandatory holidays defined by French law.",
     inputSchema: { year: z.number().describe("Calendar year as a 4-digit integer. Example: 2026") },
-    annotations: { title: "Get France Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { year: z.number(), country: z.string(), total_holidays: z.number(), holidays: z.array(z.object({ date: z.string(), name: z.string(), name_en: z.string() })) },
+        annotations: { title: "Get France Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ year }) => {
     const a = year % 19, b = Math.floor(year / 100), c = year % 100;
     const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
@@ -158,7 +165,8 @@ const createServer = () => {
   server.registerTool("validate_nif_es", {
     description: "Validates Spanish tax identification numbers — NIF (DNI, 8 digits + check letter, for Spanish citizens), NIE (Número de Identidad de Extranjero, starts with X/Y/Z, for foreign residents), and CIF (Código de Identificación Fiscal, letter + 7 digits + control, for companies). Automatically detects the document type. Returns { valid: boolean, type: 'NIF'|'NIE'|'CIF', id: string }.",
     inputSchema: { id: z.string().describe("Spanish NIF, NIE or CIF. Examples: '12345678Z' (NIF), 'X1234567L' (NIE), 'B12345678' (CIF)") },
-    annotations: { title: "Validate Spanish NIF / NIE / CIF", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), type: z.enum(["NIF","NIE","CIF"]).optional(), id: z.string().optional(), reason: z.string().optional() },
+        annotations: { title: "Validate Spanish NIF / NIE / CIF", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ id }) => {
     const clean = id.replace(/\s/g, "").toUpperCase();
     const nifLetters = "TRWAGMYFPDXBNJZSQVHLCKE";
@@ -190,7 +198,8 @@ const createServer = () => {
   server.registerTool("validate_siret", {
     description: "Validates a French SIRET (14-digit company establishment number) using the official Luhn algorithm. The first 9 digits are the SIREN (company identifier) and the last 5 identify the specific establishment. Returns { valid: boolean, siren: string, establishment: string, siret: string }. Handles the La Poste special case automatically.",
     inputSchema: { siret: z.string().describe("14-digit French SIRET, with or without spaces/dashes. Example: '732 829 320 00074'") },
-    annotations: { title: "Validate French SIRET", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), siren: z.string().optional(), establishment: z.string().optional(), siret: z.string().optional(), reason: z.string().optional() },
+        annotations: { title: "Validate French SIRET", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ siret }) => {
     const clean = siret.replace(/[\s\-]/g, "");
     if (!/^\d{14}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "SIRET must have exactly 14 digits" }) }] };
@@ -211,7 +220,8 @@ const createServer = () => {
   server.registerTool("validate_tva_fr", {
     description: "Validates a French TVA intracom (VAT) number — format 'FR' + 2 alphanumeric key characters + 9-digit SIREN. Returns { valid: boolean, key: string, siren: string, tva: string }. When the key is numeric, validates using the official formula: key = (12 + 3 × (SIREN mod 97)) mod 97.",
     inputSchema: { tva: z.string().describe("French TVA intracom number. Example: 'FR40303265045'") },
-    annotations: { title: "Validate French TVA (VAT) Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), key: z.string().optional(), siren: z.string().optional(), tva: z.string().optional(), reason: z.string().optional(), note: z.string().optional() },
+        annotations: { title: "Validate French TVA (VAT) Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ tva }) => {
     const clean = tva.replace(/\s/g, "").toUpperCase();
     if (!/^FR[A-Z0-9]{2}\d{9}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "French TVA must start with FR followed by 2 alphanumeric characters and 9 digits." }) }] };
@@ -230,7 +240,8 @@ const createServer = () => {
       start_date: z.string().describe("Start date in YYYY-MM-DD format. Example: '2026-01-01'"),
       end_date: z.string().describe("End date in YYYY-MM-DD format. Example: '2026-01-31'")
     },
-    annotations: { title: "Calculate Portuguese Working Days", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { start_date: z.string().optional(), end_date: z.string().optional(), working_days: z.number().optional(), error: z.string().optional() },
+        annotations: { title: "Calculate Portuguese Working Days", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ start_date, end_date }) => {
     const holidays = ["01-01","04-25","05-01","06-10","08-15","10-05","11-01","12-01","12-08","12-25"];
     const start = new Date(start_date), end = new Date(end_date);
@@ -254,7 +265,8 @@ const createServer = () => {
       country_code: z.string().describe("Two-letter country code. Example: 'PT', 'FR', 'DE'"),
       decimals: z.number().optional().describe("Number of decimal places. Defaults to 2.")
     },
-    annotations: { title: "Format Number European Locale", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { original: z.number(), formatted: z.string(), locale: z.string(), country_code: z.string() },
+        annotations: { title: "Format Number European Locale", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ number, country_code, decimals = 2 }) => {
     const localeMap = { PT:"pt-PT",ES:"es-ES",FR:"fr-FR",DE:"de-DE",IT:"it-IT",NL:"nl-NL",BE:"fr-BE",PL:"pl-PL",SE:"sv-SE",DK:"da-DK",FI:"fi-FI",AT:"de-AT",IE:"en-IE",GR:"el-GR",HU:"hu-HU",RO:"ro-RO",UK:"en-GB" };
     const locale = localeMap[country_code.toUpperCase()] || "en-GB";
@@ -266,7 +278,8 @@ const createServer = () => {
   server.registerTool("validate_codice_fiscale", {
     description: "Validates an Italian Codice Fiscale (fiscal code) for individuals — a 16-character alphanumeric code issued by the Italian Revenue Agency (Agenzia delle Entrate). Applies the official odd/even position checksum algorithm. Returns { valid: boolean, codice_fiscale: string } or { valid: false, reason: string }. Use when processing Italian invoices, onboarding Italian individuals, or any Italian compliance workflow requiring a verified personal fiscal code.",
     inputSchema: { codice_fiscale: z.string().describe("16-character Italian Codice Fiscale. Example: 'RSSMRA85T10A562S'") },
-    annotations: { title: "Validate Italian Codice Fiscale", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), codice_fiscale: z.string().optional(), reason: z.string().optional() },
+        annotations: { title: "Validate Italian Codice Fiscale", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ codice_fiscale }) => {
     const clean = codice_fiscale.replace(/\s/g, "").toUpperCase();
     if (!/^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$/.test(clean)) {
@@ -288,7 +301,8 @@ const createServer = () => {
   server.registerTool("validate_partita_iva", {
     description: "Validates an Italian Partita IVA (VAT number for companies and self-employed) — an 11-digit number issued by the Italian Revenue Agency. Applies the official Luhn-variant checksum algorithm used by Italian tax authorities. Returns { valid: boolean, partita_iva: string } or { valid: false, reason: string }. Use when processing Italian B2B invoices, validating Italian suppliers, or any Italian business compliance workflow.",
     inputSchema: { partita_iva: z.string().describe("11-digit Italian Partita IVA, with or without spaces. Example: '12345670017'") },
-    annotations: { title: "Validate Italian Partita IVA", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), partita_iva: z.string().optional(), reason: z.string().optional() },
+        annotations: { title: "Validate Italian Partita IVA", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ partita_iva }) => {
     const clean = partita_iva.replace(/\s/g, "");
     if (!/^\d{11}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "Partita IVA must have exactly 11 digits" }) }] };
@@ -306,7 +320,8 @@ const createServer = () => {
   server.registerTool("validate_vat_de", {
     description: "Validates a German VAT identification number (Umsatzsteuer-Identifikationsnummer, USt-IdNr) — format 'DE' followed by 9 digits. Verifies the format and applies the official ISO 7064 MOD-11-10 checksum algorithm. Returns { valid: boolean, vat_number: string, country: 'DE' } or { valid: false, reason: string }. Use when processing German invoices, validating German suppliers for intra-EU transactions, or any B2B workflow involving German companies.",
     inputSchema: { vat_number: z.string().describe("German VAT number with or without spaces. Example: 'DE123456789'") },
-    annotations: { title: "Validate German VAT Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), vat_number: z.string().optional(), country: z.string().optional(), reason: z.string().optional() },
+        annotations: { title: "Validate German VAT Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ vat_number }) => {
     const clean = vat_number.replace(/\s/g, "").toUpperCase();
     if (!/^DE\d{9}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "German VAT must start with DE followed by exactly 9 digits. Example: DE123456789" }) }] };
@@ -326,7 +341,8 @@ const createServer = () => {
   server.registerTool("validate_vat_uk", {
     description: "Validates a UK VAT registration number — format 'GB' followed by 9 digits (standard), 12 digits (branch traders), or 'GD'/'HA' followed by 3 digits (government/health authorities). Applies the official HMRC modulo-97 algorithm for 9-digit numbers. Returns { valid: boolean, vat_number: string, type: string, country: 'GB' }. Use when processing UK invoices, validating UK suppliers post-Brexit, or any B2B workflow involving UK VAT numbers.",
     inputSchema: { vat_number: z.string().describe("UK VAT number with or without spaces. Example: 'GB123456789' or '123456789'") },
-    annotations: { title: "Validate UK VAT Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), vat_number: z.string().optional(), type: z.string().optional(), country: z.string().optional(), reason: z.string().optional() },
+        annotations: { title: "Validate UK VAT Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ vat_number }) => {
     let clean = vat_number.replace(/\s/g, "").toUpperCase();
     if (!clean.startsWith("GB")) clean = "GB" + clean;
@@ -350,7 +366,8 @@ const createServer = () => {
   server.registerTool("validate_kvk_nl", {
     description: "Validates a Dutch KVK (Kamer van Koophandel) chamber of commerce number — an 8-digit registration number assigned to all businesses registered in the Netherlands. Verifies the format and applies the official weighted checksum algorithm. Returns { valid: boolean, kvk: string, country: 'NL' } or { valid: false, reason: string }. Use when processing Dutch invoices, validating Dutch suppliers, or onboarding Dutch business partners.",
     inputSchema: { kvk: z.string().describe("8-digit Dutch KVK number, with or without spaces. Example: '12345678'") },
-    annotations: { title: "Validate Dutch KVK Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), kvk: z.string().optional(), country: z.string().optional(), reason: z.string().optional() },
+        annotations: { title: "Validate Dutch KVK Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ kvk }) => {
     const clean = kvk.replace(/\s/g, "");
     if (!/^\d{8}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "KVK number must have exactly 8 digits" }) }] };
@@ -368,7 +385,8 @@ const createServer = () => {
       postal_code: z.string().describe("Postal code to validate. Example: '1000-001' for PT, '28001' for ES, 'SW1A 1AA' for UK"),
       country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'UK'")
     },
-    annotations: { title: "Validate European Postal Code", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), postal_code: z.string().optional(), country: z.string().optional(), format: z.string().optional(), reason: z.string().optional() },
+        annotations: { title: "Validate European Postal Code", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ postal_code, country_code }) => {
     const patterns = {
       PT: { regex: /^\d{4}-\d{3}$/, format: "NNNN-NNN" },
@@ -404,7 +422,8 @@ const createServer = () => {
   server.registerTool("get_payment_terms", {
     description: "Returns the legal B2B payment terms for a given European country — the default payment period, maximum allowed period, and late payment rules as defined by EU Directive 2011/7/EU and local implementations. Returns { country, default_days, max_days, late_payment_interest, notes }. Use when generating invoices, setting payment due dates, or automating accounts receivable workflows. Information provided as reference only — not legal advice.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'FR'") },
-    annotations: { title: "Get B2B Payment Terms", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { country: z.string().optional(), default_days: z.number().optional(), max_days: z.number().optional(), late_payment_interest: z.string().optional(), currency: z.string().optional(), notes: z.string().optional(), disclaimer: z.string().optional(), error: z.string().optional() },
+        annotations: { title: "Get B2B Payment Terms", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const terms = {
       PT: { country: "Portugal", default_days: 30, max_days: 60, late_payment_interest: "ECB rate + 8%", currency: "EUR", notes: "Law 62/2013. Public authorities must pay within 30 days." },
@@ -428,7 +447,8 @@ const createServer = () => {
   server.registerTool("get_invoice_requirements", {
     description: "Returns the mandatory fields required on a valid VAT invoice for a given European country, as defined by EU VAT Directive 2006/112/EC and local implementations. Returns { country, mandatory_fields: [], optional_fields: [], notes }. Use when generating invoices for EU customers, validating invoice templates, or building invoice compliance checks in agent workflows. Information provided as reference only — not legal advice.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'FR'") },
-    annotations: { title: "Get Invoice Mandatory Fields", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { country: z.string().optional(), mandatory_fields: z.array(z.string()).optional(), optional_fields: z.array(z.string()).optional(), notes: z.string().optional(), disclaimer: z.string().optional(), error: z.string().optional() },
+        annotations: { title: "Get Invoice Mandatory Fields", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const baseFields = [
       "Sequential invoice number",
@@ -463,7 +483,8 @@ const createServer = () => {
   server.registerTool("get_vat_exemption_threshold", {
     description: "Returns the annual turnover threshold below which a business may be exempt from VAT registration in a given European country — the small business VAT exemption scheme. Returns { country, threshold_local_currency, currency, threshold_eur_approx, notes }. Use when determining if a small business needs to register for VAT, or when building onboarding flows for European freelancers and micro-enterprises. Information provided as reference only — not legal advice.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'FR'") },
-    annotations: { title: "Get VAT Exemption Threshold", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { country: z.string().optional(), threshold_local_currency: z.number().nullable().optional(), currency: z.string().optional(), threshold_eur_approx: z.number().nullable().optional(), regime: z.string().optional(), notes: z.string().optional(), disclaimer: z.string().optional(), error: z.string().optional() },
+        annotations: { title: "Get VAT Exemption Threshold", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const thresholds = {
       PT: { country: "Portugal", threshold_local_currency: 13500, currency: "EUR", threshold_eur_approx: 13500, regime: "Regime de isenção (Art. 53 CIVA)", notes: "Threshold increased to €13,500 in 2023. Applies to services and goods. Cannot deduct input VAT." },
@@ -487,7 +508,8 @@ const createServer = () => {
   server.registerTool("get_einvoicing_rules", {
     description: "Returns the current e-invoicing (electronic invoicing) obligations for a given European country — whether it is mandatory for B2G (business-to-government), B2B (business-to-business), or B2C transactions, the required formats, and implementation timeline. Returns { country, b2g_mandatory, b2b_mandatory, b2c_mandatory, formats, timeline, platform, notes }. Use when building invoice generation systems, determining compliance requirements for EU customers, or automating invoice submission workflows.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO country code. Example: 'IT', 'DE', 'FR'") },
-    annotations: { title: "Get E-Invoicing Rules", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { country: z.string().optional(), b2g_mandatory: z.boolean().optional(), b2b_mandatory: z.boolean().optional(), b2c_mandatory: z.boolean().optional(), formats: z.array(z.string()).optional(), platform: z.string().optional(), timeline: z.string().optional(), notes: z.string().optional(), disclaimer: z.string().optional(), error: z.string().optional() },
+        annotations: { title: "Get E-Invoicing Rules", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const rules = {
       IT: { country: "Italy", b2g_mandatory: true, b2b_mandatory: true, b2c_mandatory: true, formats: ["FatturaPA (XML)", "SDI"], platform: "SDI (Sistema di Interscambio)", timeline: "B2G: 2014. B2B+B2C: January 2019.", notes: "Most advanced e-invoicing system in EU. All invoices must pass through SDI. Codice destinatario required." },
@@ -519,7 +541,8 @@ const createServer = () => {
       start_date: z.string().describe("Start date in YYYY-MM-DD format. Example: '2026-01-01'"),
       end_date: z.string().describe("End date in YYYY-MM-DD format. Example: '2026-12-31'")
     },
-    annotations: { title: "Get Public Holidays in Date Range", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { country: z.string().optional(), start_date: z.string().optional(), end_date: z.string().optional(), total_holidays: z.number().optional(), holidays: z.array(z.object({ date: z.string(), name: z.string(), name_en: z.string() })).optional(), error: z.string().optional() },
+        annotations: { title: "Get Public Holidays in Date Range", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code, start_date, end_date }) => {
     const start = new Date(start_date), end = new Date(end_date);
     if (isNaN(start) || isNaN(end)) return { content: [{ type: "text", text: JSON.stringify({ error: "Invalid date format. Use YYYY-MM-DD" }) }] };
@@ -676,7 +699,8 @@ const createServer = () => {
       start_date: z.string().describe("Start date in YYYY-MM-DD format, inclusive. Example: '2026-01-01'"),
       end_date: z.string().describe("End date in YYYY-MM-DD format, inclusive. Example: '2026-01-31'")
     },
-    annotations: { title: "Calculate Working Days (EU Multi-Country)", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { country: z.string().optional(), start_date: z.string().optional(), end_date: z.string().optional(), working_days: z.number().optional(), holidays_excluded: z.number().optional(), error: z.string().optional() },
+        annotations: { title: "Calculate Working Days (EU Multi-Country)", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code, start_date, end_date }) => {
     const holidaysByCountry = {
       PT: ["01-01","04-25","05-01","06-10","08-15","10-05","11-01","12-01","12-08","12-25"],
@@ -743,7 +767,8 @@ const createServer = () => {
       rule: z.enum(["last_working_day_of_month", "first_working_day_of_month", "next_working_day", "nth_working_day"]).describe("Payment rule to apply."),
       n: z.number().optional().describe("For nth_working_day rule: which working day of the month. Example: 5 for 5th working day.")
     },
-    annotations: { title: "Get Next Payment Date", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { country: z.string().optional(), reference_date: z.string().optional(), rule: z.string().optional(), result_date: z.string().optional(), error: z.string().optional() },
+        annotations: { title: "Get Next Payment Date", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code, reference_date, rule, n }) => {
     const holidaysByCountry = {
       PT: ["01-01","04-25","05-01","06-10","08-15","10-05","11-01","12-01","12-08","12-25"],
@@ -827,7 +852,8 @@ const createServer = () => {
         currency: z.string().optional(),
       }).describe("Invoice object to validate")
     },
-    annotations: { title: "Validate Invoice Schema", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { valid: z.boolean(), country: z.string().optional(), missing_fields: z.array(z.string()).optional(), present_fields: z.array(z.string()).optional(), warnings: z.array(z.string()).optional(), disclaimer: z.string().optional() },
+        annotations: { title: "Validate Invoice Schema", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code, invoice }) => {
     const baseRequired = ["invoice_number", "invoice_date", "supplier_name", "supplier_tax_id", "customer_name", "line_items", "vat_rate", "vat_amount", "total_excl_vat", "total_incl_vat"];
     const countryExtra = {
@@ -879,7 +905,8 @@ const createServer = () => {
       currency: z.string().optional().describe("Currency code. Example: 'EUR', 'GBP'. Defaults to 'EUR'"),
       round_decimals: z.number().optional().describe("Decimal places for rounding. Defaults to 2")
     },
-    annotations: { title: "Calculate VAT Breakdown", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { lines_summary: z.array(z.any()), vat_breakdown: z.array(z.object({ rate: z.number(), base_amount: z.number(), vat_amount: z.number() })), total_excl_vat: z.number(), total_vat: z.number(), total_incl_vat: z.number(), currency: z.string() },
+        annotations: { title: "Calculate VAT Breakdown", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ lines, currency = "EUR", round_decimals = 2 }) => {
     const round = (n) => Math.round(n * Math.pow(10, round_decimals)) / Math.pow(10, round_decimals);
     const vatGroups = {};
@@ -908,7 +935,8 @@ const createServer = () => {
       buyer_is_vat_registered: z.boolean().describe("Whether the buyer is VAT registered (B2B) or not (B2C)"),
       goods_type: z.enum(["goods", "digital_services", "services"]).describe("Type of supply")
     },
-    annotations: { title: "Suggest VAT Treatment", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { treatment: z.string(), description: z.string(), seller_charges_vat: z.boolean(), applicable_rate: z.string(), seller_country: z.string(), buyer_country: z.string(), buyer_is_vat_registered: z.boolean(), goods_type: z.string(), notes: z.string(), disclaimer: z.string() },
+        annotations: { title: "Suggest VAT Treatment", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ seller_country, buyer_country, buyer_is_vat_registered, goods_type }) => {
     const seller = seller_country.toUpperCase();
     const buyer = buyer_country.toUpperCase();
@@ -982,7 +1010,8 @@ const createServer = () => {
       amount_type: z.enum(["net", "gross"]).describe("Whether the input amount is net (excluding VAT) or gross (including VAT)"),
       currency: z.string().optional().describe("Currency code. Example: 'EUR', 'GBP'. Defaults to 'EUR'")
     },
-    annotations: { title: "Calculate VAT Amount", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { net_amount: z.number(), vat_amount: z.number(), gross_amount: z.number(), vat_rate: z.number(), currency: z.string() },
+        annotations: { title: "Calculate VAT Amount", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ amount, vat_rate, amount_type, currency = "EUR" }) => {
     const round = (n) => Math.round(n * 100) / 100;
     let net, vat, gross;
