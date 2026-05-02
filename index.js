@@ -1032,7 +1032,8 @@ const createServer = () => {
 };
 
 // ── Dual Transport: stdio (Glama/local) or HTTP (Railway/production) ──
-const isStdio = !process.env.PORT && !process.stdin.isTTY;
+// Railway always sets PORT env var — use that as the only signal
+const isStdio = !process.env.PORT;
 
 if (isStdio) {
   // Stdio mode — used by Glama safety checks and local MCP clients
