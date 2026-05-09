@@ -4,10 +4,87 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import http from "http";
 
+// ════════════════════════════════════════════════
+// SHARED HELPERS (timezone-safe)
+// ════════════════════════════════════════════════
+
+// Format Date as YYYY-MM-DD using LOCAL time (avoids UTC offset bugs)
+const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
+
+const getEaster = (y) => {
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100;
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(y, month - 1, day);
+};
+
+// Returns array of YYYY-MM-DD strings of moveable (Easter-based) holidays for a country/year
+const getMoveableHolidayDates = (year, country) => {
+  const easter = getEaster(year);
+  const dates = [];
+  if (country === "FR") {
+    dates.push(fmt(addDays(easter, 1)));   // Lundi de Pâques
+    dates.push(fmt(addDays(easter, 39)));  // Ascension
+    dates.push(fmt(addDays(easter, 50)));  // Lundi de Pentecôte
+  }
+  if (country === "DE") {
+    dates.push(fmt(addDays(easter, -2)));  // Karfreitag
+    dates.push(fmt(addDays(easter, 1)));   // Ostermontag
+    dates.push(fmt(addDays(easter, 39)));  // Himmelfahrt
+    dates.push(fmt(addDays(easter, 50)));  // Pfingstmontag
+  }
+  if (country === "NL") {
+    dates.push(fmt(addDays(easter, -2)));  // Goede Vrijdag
+    dates.push(fmt(addDays(easter, 1)));   // Tweede Paasdag
+    dates.push(fmt(addDays(easter, 39)));  // Hemelvaartsdag
+    dates.push(fmt(addDays(easter, 50)));  // Tweede Pinksterdag
+  }
+  if (country === "BE") {
+    dates.push(fmt(addDays(easter, 1)));   // Lundi de Pâques
+    dates.push(fmt(addDays(easter, 39)));  // Ascension
+    dates.push(fmt(addDays(easter, 50)));  // Lundi de Pentecôte
+  }
+  if (country === "UK") {
+    dates.push(fmt(addDays(easter, -2)));  // Good Friday
+    dates.push(fmt(addDays(easter, 1)));   // Easter Monday
+  }
+  if (country === "IT") {
+    dates.push(fmt(addDays(easter, 1)));   // Pasquetta
+  }
+  if (country === "ES") {
+    dates.push(fmt(addDays(easter, -2)));  // Viernes Santo
+  }
+  if (country === "PT") {
+    dates.push(fmt(addDays(easter, -2)));  // Sexta-feira Santa
+  }
+  return dates;
+};
+
+const FIXED_HOLIDAYS = {
+  PT: ["01-01","04-25","05-01","06-10","08-15","10-05","11-01","12-01","12-08","12-25"],
+  ES: ["01-01","01-06","05-01","08-15","10-12","11-01","12-06","12-08","12-25"],
+  FR: ["01-01","05-01","05-08","07-14","08-15","11-01","11-11","12-25"],
+  DE: ["01-01","05-01","10-03","12-25","12-26"],
+  IT: ["01-01","01-06","04-25","05-01","06-02","08-15","11-01","12-08","12-25","12-26"],
+  NL: ["01-01","04-27","05-05","12-25","12-26"],
+  BE: ["01-01","05-01","07-21","08-15","11-01","11-11","12-25"],
+  UK: ["01-01","12-25","12-26"],
+};
+
+// ════════════════════════════════════════════════
+// SERVER FACTORY
+// ════════════════════════════════════════════════
+
 const createServer = () => {
   const server = new McpServer({
     name: "mcp-europe-business",
-    version: "1.0.0",
+    version: "1.2.0",
     description: "European business compliance suite for AI agents. Covers tax ID validation for PT, ES, FR, DE, IT, UK, NL; IBAN verification; VAT rates and invoice rules for 18+ EU countries; business rules for payment terms, e-invoicing and VAT thresholds; labor calendar helpers; and invoice/VAT calculation tools. No auth required, read-only, offline."
   });
 
@@ -19,7 +96,7 @@ const createServer = () => {
   server.registerTool("validate_nif", {
     description: "Validates a Portuguese NIF (Número de Identificação Fiscal) — the 9-digit tax identification number issued by the Portuguese Tax Authority (AT) to individuals and companies. Applies the official modulo-11 checksum algorithm to verify the check digit. Returns { valid: true, nif: string } for valid NIFs, or { valid: false, reason: string } for invalid format or failed checksum. First-digit rules are enforced: 1–3 for individuals, 5 for corporations, 6 for public entities, 7–8 for other entities, 9 for occasional taxpayers. Use when processing Portuguese invoices (faturas), onboarding suppliers, validating user registrations, or any fiscal compliance workflow. Does not query the AT database — offline format and checksum validation only.",
     inputSchema: { nif: z.string().describe("9-digit Portuguese NIF, with or without spaces. Example: '123456789'") },
-    outputSchema: { valid: z.boolean().describe("Whether the NIF is valid"), nif: z.string().optional().describe("Normalized NIF without spaces"), reason: z.string().optional().describe("Reason for invalidity if valid is false") },
+    outputSchema: { valid: z.boolean(), nif: z.string().optional(), reason: z.string().optional() },
     annotations: { title: "Validate Portuguese NIF", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ nif }) => {
     const clean = nif.replace(/\s/g, "");
@@ -40,24 +117,25 @@ const createServer = () => {
     description: "Validates an IBAN (International Bank Account Number) using the ISO 13616 MOD-97 algorithm. Supports 18 European countries: PT, ES, FR, DE, IT, NL, BE, PL, SE, DK, FI, AT, IE, GR, HU, RO, CZ, HR. Returns { valid: boolean, country: string, iban: string } — country is extracted from the 2-letter prefix. Returns { valid: false, reason: string } for malformed input. Spaces are automatically stripped before validation. Use when validating supplier bank details for SEPA transfers, processing direct debit mandates, verifying payment data in e-commerce checkouts, or any workflow requiring a verified EU bank account number. Validates structure and checksum only — does not confirm account existence.",
     inputSchema: { iban: z.string().describe("European IBAN with or without spaces. Example: 'PT50 0002 0123 1234 5678 9015 4'") },
     outputSchema: { valid: z.boolean(), country: z.string().optional(), iban: z.string().optional(), reason: z.string().optional() },
-        annotations: { title: "Validate IBAN", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate IBAN", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ iban }) => {
     const clean = iban.replace(/\s/g, "").toUpperCase();
-    if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "Invalid IBAN format" }) }] };
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(clean)) { const r = { valid: false, reason: "Invalid IBAN format" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     const rearranged = clean.slice(4) + clean.slice(0, 4);
     const numeric = rearranged.split("").map(c => isNaN(c) ? (c.charCodeAt(0) - 55).toString() : c).join("");
     let remainder = 0;
     for (let i = 0; i < numeric.length; i++) remainder = (remainder * 10 + parseInt(numeric[i])) % 97;
     const valid = remainder === 1;
-    return { content: [{ type: "text", text: JSON.stringify({ valid, country: clean.slice(0, 2), iban: clean }) }] };
+    const r = { valid, country: clean.slice(0, 2), iban: clean };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 3. Get EU VAT Rate ──
   server.registerTool("get_vat_rate", {
-    description: "Returns all VAT (Value Added Tax) rates for a given EU country — standard, reduced, intermediate, and super-reduced rates where applicable, as numeric percentages. Returns { country, standard, reduced?, intermediate?, superreduced? } for supported countries, or { error, available } listing all valid codes if the country is not found. Supports 18 EU member states: PT, ES, FR, DE, IT, NL, BE, PL, SE, DK, FI, AT, IE, GR, HU, RO, CZ, HR. Use when calculating EU cross-border invoice tax, determining correct rate for e-commerce checkout by customer country, generating compliant VAT breakdowns, or any workflow requiring accurate and current EU VAT rates per jurisdiction.",
+    description: "Returns all VAT (Value Added Tax) rates for a given EU country — standard, reduced, intermediate, and super-reduced rates where applicable, as numeric percentages. Returns { country, standard, reduced?, intermediate?, superreduced? } for supported countries, or { error, available } listing all valid codes if the country is not found. Supports 19 European countries: PT, ES, FR, DE, IT, NL, BE, PL, SE, DK, FI, AT, IE, GR, HU, RO, CZ, HR, UK. Use when calculating EU cross-border invoice tax, determining correct rate for e-commerce checkout by customer country, generating compliant VAT breakdowns, or any workflow requiring accurate and current EU VAT rates per jurisdiction.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO 3166-1 alpha-2 country code. Example: 'PT', 'FR', 'DE'") },
     outputSchema: { country: z.string().optional(), standard: z.number().optional(), reduced: z.number().optional(), intermediate: z.number().optional(), superreduced: z.number().optional(), error: z.string().optional() },
-        annotations: { title: "Get EU VAT Rate", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Get EU VAT Rate", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const rates = {
       PT: { standard: 23, intermediate: 13, reduced: 6, country: "Portugal" },
@@ -82,19 +160,21 @@ const createServer = () => {
     };
     const code = country_code.toUpperCase();
     const data = rates[code];
-    if (!data) return { content: [{ type: "text", text: JSON.stringify({ error: `Country ${code} not found. Available: ${Object.keys(rates).join(", ")}` }) }] };
-    return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    if (!data) { const r = { error: `Country ${code} not found. Available: ${Object.keys(rates).join(", ")}` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
+    return { content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data };
   });
 
   // ── 4. Get Portugal Holidays ──
   server.registerTool("get_portugal_holidays", {
-    description: "Returns all Portuguese national public holidays for a given year as a structured list. Each holiday includes { date: 'YYYY-MM-DD', name: string, name_en: string }. Returns 10 mandatory national holidays defined by Portuguese law. Use when calculating business deadlines, delivery dates, payment due dates, SLA periods, or scheduling tasks that must avoid non-working days in Portugal.",
+    description: "Returns all Portuguese national public holidays for a given year as a structured list. Each holiday includes { date: 'YYYY-MM-DD', name: string, name_en: string }. Includes Easter-based moveable holiday (Sexta-feira Santa) calculated dynamically. Returns 11 mandatory national holidays defined by Portuguese law. Use when calculating business deadlines, delivery dates, payment due dates, SLA periods, or scheduling tasks that must avoid non-working days in Portugal.",
     inputSchema: { year: z.number().describe("Calendar year as a 4-digit integer. Example: 2026") },
     outputSchema: { year: z.number(), country: z.string(), total_holidays: z.number(), holidays: z.array(z.object({ date: z.string(), name: z.string(), name_en: z.string() })) },
-        annotations: { title: "Get Portugal Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Get Portugal Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ year }) => {
+    const easter = getEaster(year);
     const holidays = [
       { date: `${year}-01-01`, name: "Ano Novo", name_en: "New Year's Day" },
+      { date: fmt(addDays(easter, -2)), name: "Sexta-feira Santa", name_en: "Good Friday" },
       { date: `${year}-04-25`, name: "Dia da Liberdade", name_en: "Freedom Day" },
       { date: `${year}-05-01`, name: "Dia do Trabalhador", name_en: "Labour Day" },
       { date: `${year}-06-10`, name: "Dia de Portugal", name_en: "Portugal Day" },
@@ -105,19 +185,23 @@ const createServer = () => {
       { date: `${year}-12-08`, name: "Imaculada Conceição", name_en: "Immaculate Conception" },
       { date: `${year}-12-25`, name: "Natal", name_en: "Christmas Day" },
     ];
-    return { content: [{ type: "text", text: JSON.stringify({ year, country: "Portugal", total_holidays: holidays.length, holidays }) }] };
+    holidays.sort((a, b) => a.date.localeCompare(b.date));
+    const r = { year, country: "Portugal", total_holidays: holidays.length, holidays };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 5. Get Spain Holidays ──
   server.registerTool("get_spain_holidays", {
-    description: "Returns all Spanish national public holidays for a given year as a structured list. Each holiday includes { date: 'YYYY-MM-DD', name: string, name_en: string }. Returns 9 mandatory national holidays defined by Spanish law. Does not include regional holidays that vary by autonomous community.",
+    description: "Returns all Spanish national public holidays for a given year as a structured list. Each holiday includes { date: 'YYYY-MM-DD', name: string, name_en: string }. Includes Easter-based moveable holiday (Viernes Santo) calculated dynamically. Returns 10 mandatory national holidays defined by Spanish law. Does not include regional holidays that vary by autonomous community.",
     inputSchema: { year: z.number().describe("Calendar year as a 4-digit integer. Example: 2026") },
     outputSchema: { year: z.number(), country: z.string(), total_holidays: z.number(), holidays: z.array(z.object({ date: z.string(), name: z.string(), name_en: z.string() })) },
-        annotations: { title: "Get Spain Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Get Spain Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ year }) => {
+    const easter = getEaster(year);
     const holidays = [
       { date: `${year}-01-01`, name: "Año Nuevo", name_en: "New Year's Day" },
       { date: `${year}-01-06`, name: "Epifanía del Señor", name_en: "Epiphany" },
+      { date: fmt(addDays(easter, -2)), name: "Viernes Santo", name_en: "Good Friday" },
       { date: `${year}-05-01`, name: "Fiesta del Trabajo", name_en: "Labour Day" },
       { date: `${year}-08-15`, name: "Asunción de la Virgen", name_en: "Assumption of Mary" },
       { date: `${year}-10-12`, name: "Fiesta Nacional de España", name_en: "Spanish National Day" },
@@ -126,7 +210,9 @@ const createServer = () => {
       { date: `${year}-12-08`, name: "Inmaculada Concepción", name_en: "Immaculate Conception" },
       { date: `${year}-12-25`, name: "Navidad", name_en: "Christmas Day" },
     ];
-    return { content: [{ type: "text", text: JSON.stringify({ year, country: "Spain", total_holidays: holidays.length, holidays }) }] };
+    holidays.sort((a, b) => a.date.localeCompare(b.date));
+    const r = { year, country: "Spain", total_holidays: holidays.length, holidays };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 6. Get France Holidays ──
@@ -134,18 +220,9 @@ const createServer = () => {
     description: "Returns all French national public holidays for a given year. Easter-dependent holidays (Easter Monday, Ascension, Whit Monday) are dynamically calculated using the Anonymous Gregorian algorithm. Returns 11 mandatory holidays defined by French law.",
     inputSchema: { year: z.number().describe("Calendar year as a 4-digit integer. Example: 2026") },
     outputSchema: { year: z.number(), country: z.string(), total_holidays: z.number(), holidays: z.array(z.object({ date: z.string(), name: z.string(), name_en: z.string() })) },
-        annotations: { title: "Get France Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Get France Public Holidays", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ year }) => {
-    const a = year % 19, b = Math.floor(year / 100), c = year % 100;
-    const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
-    const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
-    const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
-    const m = Math.floor((a + 11 * h + 22 * l) / 451);
-    const month = Math.floor((h + l - 7 * m + 114) / 31);
-    const day = ((h + l - 7 * m + 114) % 31) + 1;
-    const easter = new Date(year, month - 1, day);
-    const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
-    const fmt = (d) => d.toISOString().split("T")[0];
+    const easter = getEaster(year);
     const holidays = [
       { date: `${year}-01-01`, name: "Jour de l'An", name_en: "New Year's Day" },
       { date: fmt(addDays(easter, 1)), name: "Lundi de Pâques", name_en: "Easter Monday" },
@@ -159,26 +236,30 @@ const createServer = () => {
       { date: `${year}-11-11`, name: "Armistice", name_en: "Armistice Day" },
       { date: `${year}-12-25`, name: "Noël", name_en: "Christmas Day" },
     ];
-    return { content: [{ type: "text", text: JSON.stringify({ year, country: "France", total_holidays: holidays.length, holidays }) }] };
+    holidays.sort((a, b) => a.date.localeCompare(b.date));
+    const r = { year, country: "France", total_holidays: holidays.length, holidays };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 7. Validate Spanish NIF/NIE/CIF ──
   server.registerTool("validate_nif_es", {
-    description: "Validates Spanish tax identification numbers — NIF (DNI, 8 digits + check letter, for Spanish citizens), NIE (Número de Identidad de Extranjero, starts with X/Y/Z, for foreign residents), and CIF (Código de Identificación Fiscal, letter + 7 digits + control, for companies). Automatically detects the document type. Returns { valid: boolean, type: 'NIF'|'NIE'|'CIF', id: string }.",
+    description: "Validates Spanish tax identification numbers — NIF (DNI, 8 digits + check letter, for Spanish citizens), NIE (Número de Identidad de Extranjero, starts with X/Y/Z, for foreign residents), and CIF (Código de Identificación Fiscal, letter + 7 digits + control, for companies). Automatically detects the document type. Applies the official check letter algorithm based on the modulo-23 lookup table 'TRWAGMYFPDXBNJZSQVHLCKE'. Returns { valid: boolean, type: 'NIF'|'NIE'|'CIF', id: string } or { valid: false, reason: string }. Use when processing Spanish invoices, supplier registration, or any Spanish tax compliance workflow.",
     inputSchema: { id: z.string().describe("Spanish NIF, NIE or CIF. Examples: '12345678Z' (NIF), 'X1234567L' (NIE), 'B12345678' (CIF)") },
     outputSchema: { valid: z.boolean(), type: z.enum(["NIF","NIE","CIF"]).optional(), id: z.string().optional(), reason: z.string().optional() },
-        annotations: { title: "Validate Spanish NIF / NIE / CIF", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate Spanish NIF / NIE / CIF", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ id }) => {
     const clean = id.replace(/\s/g, "").toUpperCase();
     const nifLetters = "TRWAGMYFPDXBNJZSQVHLCKE";
     if (/^\d{8}[A-Z]$/.test(clean)) {
       const valid = clean[8] === nifLetters[parseInt(clean.slice(0, 8)) % 23];
-      return { content: [{ type: "text", text: JSON.stringify({ valid, type: "NIF", id: clean }) }] };
+      const r = { valid, type: "NIF", id: clean };
+      return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
     }
     if (/^[XYZ]\d{7}[A-Z]$/.test(clean)) {
       const nieMap = { X: "0", Y: "1", Z: "2" };
       const valid = clean[8] === nifLetters[parseInt(nieMap[clean[0]] + clean.slice(1, 8)) % 23];
-      return { content: [{ type: "text", text: JSON.stringify({ valid, type: "NIE", id: clean }) }] };
+      const r = { valid, type: "NIE", id: clean };
+      return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
     }
     if (/^[ABCDEFGHJKLMNPQRSUVW]\d{7}[0-9A-J]$/.test(clean)) {
       const letters = "JABCDEFGHI";
@@ -186,27 +267,30 @@ const createServer = () => {
       for (let i = 1; i <= 7; i++) {
         const digit = parseInt(clean[i]);
         if (i % 2 === 0) sumEven += digit;
-        else { const d = digit * 2; sumOdd += d > 9 ? d - 9 : d; }
+        else { const dd = digit * 2; sumOdd += dd > 9 ? dd - 9 : dd; }
       }
       const controlDigit = (10 - ((sumOdd + sumEven) % 10)) % 10;
       const valid = clean[8] === controlDigit.toString() || clean[8] === letters[controlDigit];
-      return { content: [{ type: "text", text: JSON.stringify({ valid, type: "CIF", id: clean }) }] };
+      const r = { valid, type: "CIF", id: clean };
+      return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
     }
-    return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "Format not recognized. Expected NIF (8 digits + letter), NIE (X/Y/Z + 7 digits + letter) or CIF (letter + 7 digits + control)" }) }] };
+    const r = { valid: false, reason: "Format not recognized. Expected NIF (8 digits + letter), NIE (X/Y/Z + 7 digits + letter) or CIF (letter + 7 digits + control)" };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 8. Validate French SIRET ──
   server.registerTool("validate_siret", {
-    description: "Validates a French SIRET (14-digit company establishment number) using the official Luhn algorithm. The first 9 digits are the SIREN (company identifier) and the last 5 identify the specific establishment. Returns { valid: boolean, siren: string, establishment: string, siret: string }. Handles the La Poste special case automatically.",
+    description: "Validates a French SIRET (14-digit company establishment number) using the official Luhn algorithm. The first 9 digits are the SIREN (company identifier) and the last 5 identify the specific establishment. Returns { valid: boolean, siren: string, establishment: string, siret: string } or { valid: false, reason: string }. Handles the La Poste special case automatically (SIREN 356000000 uses sum-modulo-5 instead of Luhn). Use when processing French B2B invoices, supplier validation, or any French business compliance workflow involving establishment-level identification.",
     inputSchema: { siret: z.string().describe("14-digit French SIRET, with or without spaces/dashes. Example: '732 829 320 00074'") },
     outputSchema: { valid: z.boolean(), siren: z.string().optional(), establishment: z.string().optional(), siret: z.string().optional(), reason: z.string().optional() },
-        annotations: { title: "Validate French SIRET", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate French SIRET", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ siret }) => {
     const clean = siret.replace(/[\s\-]/g, "");
-    if (!/^\d{14}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "SIRET must have exactly 14 digits" }) }] };
+    if (!/^\d{14}$/.test(clean)) { const r = { valid: false, reason: "SIRET must have exactly 14 digits" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     if (clean.startsWith("356000000")) {
       const valid = clean.split("").reduce((acc, d) => acc + parseInt(d), 0) % 5 === 0;
-      return { content: [{ type: "text", text: JSON.stringify({ valid, siren: clean.substring(0, 9), establishment: clean.substring(9), siret: clean }) }] };
+      const r = { valid, siren: clean.substring(0, 9), establishment: clean.substring(9), siret: clean };
+      return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
     }
     let sum = 0;
     for (let i = 0; i < 14; i++) {
@@ -214,77 +298,87 @@ const createServer = () => {
       if (i % 2 === 0) { digit *= 2; if (digit > 9) digit -= 9; }
       sum += digit;
     }
-    return { content: [{ type: "text", text: JSON.stringify({ valid: sum % 10 === 0, siren: clean.substring(0, 9), establishment: clean.substring(9), siret: clean }) }] };
+    const r = { valid: sum % 10 === 0, siren: clean.substring(0, 9), establishment: clean.substring(9), siret: clean };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 9. Validate French TVA ──
   server.registerTool("validate_tva_fr", {
-    description: "Validates a French TVA intracom (VAT) number — format 'FR' + 2 alphanumeric key characters + 9-digit SIREN. Returns { valid: boolean, key: string, siren: string, tva: string }. When the key is numeric, validates using the official formula: key = (12 + 3 × (SIREN mod 97)) mod 97.",
+    description: "Validates a French TVA intracom (VAT) number — format 'FR' + 2 alphanumeric key characters + 9-digit SIREN. Returns { valid: boolean, key: string, siren: string, tva: string } or { valid: false, reason: string }. When the key is numeric, validates using the official formula: key = (12 + 3 × (SIREN mod 97)) mod 97. When the key is alphanumeric, format is verified but checksum is not applicable. Use when processing French intra-EU B2B invoices or validating French VAT-registered suppliers.",
     inputSchema: { tva: z.string().describe("French TVA intracom number. Example: 'FR40303265045'") },
     outputSchema: { valid: z.boolean(), key: z.string().optional(), siren: z.string().optional(), tva: z.string().optional(), reason: z.string().optional(), note: z.string().optional() },
-        annotations: { title: "Validate French TVA (VAT) Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate French TVA (VAT) Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ tva }) => {
     const clean = tva.replace(/\s/g, "").toUpperCase();
-    if (!/^FR[A-Z0-9]{2}\d{9}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "French TVA must start with FR followed by 2 alphanumeric characters and 9 digits." }) }] };
+    if (!/^FR[A-Z0-9]{2}\d{9}$/.test(clean)) { const r = { valid: false, reason: "French TVA must start with FR followed by 2 alphanumeric characters and 9 digits." }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     const key = clean.substring(2, 4), siren = clean.substring(4);
     if (/^\d{2}$/.test(key)) {
       const valid = parseInt(key) === (12 + 3 * (parseInt(siren) % 97)) % 97;
-      return { content: [{ type: "text", text: JSON.stringify({ valid, key, siren, tva: clean }) }] };
+      const r = { valid, key, siren, tva: clean };
+      return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
     }
-    return { content: [{ type: "text", text: JSON.stringify({ valid: true, key, siren, tva: clean, note: "Alphanumeric key — format valid, checksum not applicable" }) }] };
+    const r = { valid: true, key, siren, tva: clean, note: "Alphanumeric key — format valid, checksum not applicable" };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 10. Calculate Working Days (Portugal) ──
   server.registerTool("calculate_working_days", {
-    description: "Counts the number of working days between two dates (inclusive), excluding Saturdays, Sundays, and all 10 Portuguese national public holidays. Returns { start_date, end_date, working_days: number }. Use when calculating Portuguese invoice payment deadlines, legal notice periods, or SLA response times.",
+    description: "Counts the number of working days between two dates (inclusive) for Portugal, excluding Saturdays, Sundays, and all 11 Portuguese national public holidays (including Easter-based Sexta-feira Santa). Returns { start_date, end_date, working_days: number }. Use when calculating Portuguese invoice payment deadlines, legal notice periods, or SLA response times. For other EU countries use calculate_working_days_eu.",
     inputSchema: {
       start_date: z.string().describe("Start date in YYYY-MM-DD format. Example: '2026-01-01'"),
       end_date: z.string().describe("End date in YYYY-MM-DD format. Example: '2026-01-31'")
     },
     outputSchema: { start_date: z.string().optional(), end_date: z.string().optional(), working_days: z.number().optional(), error: z.string().optional() },
-        annotations: { title: "Calculate Portuguese Working Days", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Calculate Portuguese Working Days", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ start_date, end_date }) => {
-    const holidays = ["01-01","04-25","05-01","06-10","08-15","10-05","11-01","12-01","12-08","12-25"];
     const start = new Date(start_date), end = new Date(end_date);
-    if (isNaN(start) || isNaN(end)) return { content: [{ type: "text", text: JSON.stringify({ error: "Invalid date format. Use YYYY-MM-DD" }) }] };
+    if (isNaN(start) || isNaN(end)) { const r = { error: "Invalid date format. Use YYYY-MM-DD" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
+    const fixed = FIXED_HOLIDAYS.PT;
+    const moveableByYear = {};
+    for (let y = start.getFullYear(); y <= end.getFullYear(); y++) moveableByYear[y] = getMoveableHolidayDates(y, "PT");
     let count = 0;
     const current = new Date(start);
     while (current <= end) {
       const dow = current.getDay();
       const mmdd = `${String(current.getMonth() + 1).padStart(2, "0")}-${String(current.getDate()).padStart(2, "0")}`;
-      if (dow !== 0 && dow !== 6 && !holidays.includes(mmdd)) count++;
+      const fullDate = fmt(current);
+      const isHoliday = fixed.includes(mmdd) || (moveableByYear[current.getFullYear()] || []).includes(fullDate);
+      if (dow !== 0 && dow !== 6 && !isHoliday) count++;
       current.setDate(current.getDate() + 1);
     }
-    return { content: [{ type: "text", text: JSON.stringify({ start_date, end_date, working_days: count }) }] };
+    const r = { start_date, end_date, working_days: count };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 11. Format Number European ──
   server.registerTool("format_number_european", {
-    description: "Formats a number using the locale conventions of a specific European country — correct decimal and thousands separators. Returns { original, formatted, locale, country_code }. Supports PT, ES, FR, DE, IT, NL, BE, PL, SE, DK, FI, AT, IE, GR, HU, RO, UK.",
+    description: "Formats a number using the locale conventions of a specific European country — correct decimal and thousands separators following Intl.NumberFormat standards. Returns { original, formatted, locale, country_code }. Supports 17 European locales: PT (1.234,56), ES (1.234,56), FR (1 234,56), DE (1.234,56), IT (1.234,56), NL (1.234,56), BE (1.234,56), PL (1 234,56), SE (1 234,56), DK (1.234,56), FI (1 234,56), AT (1.234,56), IE (1,234.56), GR (1.234,56), HU (1 234,56), RO (1.234,56), UK (1,234.56). Use when displaying prices, financial amounts, or numeric data in user-facing applications across multiple European markets.",
     inputSchema: {
       number: z.number().describe("The numeric value to format. Example: 1234.56"),
       country_code: z.string().describe("Two-letter country code. Example: 'PT', 'FR', 'DE'"),
       decimals: z.number().optional().describe("Number of decimal places. Defaults to 2.")
     },
     outputSchema: { original: z.number(), formatted: z.string(), locale: z.string(), country_code: z.string() },
-        annotations: { title: "Format Number European Locale", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Format Number European Locale", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ number, country_code, decimals = 2 }) => {
     const localeMap = { PT:"pt-PT",ES:"es-ES",FR:"fr-FR",DE:"de-DE",IT:"it-IT",NL:"nl-NL",BE:"fr-BE",PL:"pl-PL",SE:"sv-SE",DK:"da-DK",FI:"fi-FI",AT:"de-AT",IE:"en-IE",GR:"el-GR",HU:"hu-HU",RO:"ro-RO",UK:"en-GB" };
     const locale = localeMap[country_code.toUpperCase()] || "en-GB";
     const formatted = new Intl.NumberFormat(locale, { minimumFractionDigits: decimals, maximumFractionDigits: decimals }).format(number);
-    return { content: [{ type: "text", text: JSON.stringify({ original: number, formatted, locale, country_code }) }] };
+    const r = { original: number, formatted, locale, country_code };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 12. Validate Italian Codice Fiscale ──
   server.registerTool("validate_codice_fiscale", {
-    description: "Validates an Italian Codice Fiscale (fiscal code) for individuals — a 16-character alphanumeric code issued by the Italian Revenue Agency (Agenzia delle Entrate). Applies the official odd/even position checksum algorithm. Returns { valid: boolean, codice_fiscale: string } or { valid: false, reason: string }. Use when processing Italian invoices, onboarding Italian individuals, or any Italian compliance workflow requiring a verified personal fiscal code.",
+    description: "Validates an Italian Codice Fiscale (fiscal code) for individuals — a 16-character alphanumeric code issued by the Italian Revenue Agency (Agenzia delle Entrate). Applies the official odd/even position checksum algorithm with the standard letter-to-value mapping tables. Returns { valid: boolean, codice_fiscale: string } or { valid: false, reason: string }. Use when processing Italian invoices, onboarding Italian individuals, or any Italian compliance workflow requiring a verified personal fiscal code. Format validation only — does not query Agenzia delle Entrate.",
     inputSchema: { codice_fiscale: z.string().describe("16-character Italian Codice Fiscale. Example: 'RSSMRA85T10A562S'") },
     outputSchema: { valid: z.boolean(), codice_fiscale: z.string().optional(), reason: z.string().optional() },
-        annotations: { title: "Validate Italian Codice Fiscale", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate Italian Codice Fiscale", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ codice_fiscale }) => {
     const clean = codice_fiscale.replace(/\s/g, "").toUpperCase();
     if (!/^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$/.test(clean)) {
-      return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "Codice Fiscale must be 16 characters: 6 letters, 2 digits, 1 letter, 2 digits, 1 letter, 3 digits, 1 letter" }) }] };
+      const r = { valid: false, reason: "Codice Fiscale must be 16 characters: 6 letters, 2 digits, 1 letter, 2 digits, 1 letter, 3 digits, 1 letter" };
+      return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
     }
     const oddValues = { 0:1,1:0,2:5,3:7,4:9,5:13,6:15,7:17,8:19,9:21,A:1,B:0,C:5,D:7,E:9,F:13,G:15,H:17,I:19,J:21,K:2,L:4,M:18,N:20,O:11,P:3,Q:6,R:8,S:12,T:14,U:16,V:10,W:22,X:25,Y:24,Z:23 };
     const evenValues = { 0:0,1:1,2:2,3:3,4:4,5:5,6:6,7:7,8:8,9:9,A:0,B:1,C:2,D:3,E:4,F:5,G:6,H:7,I:8,J:9,K:10,L:11,M:12,N:13,O:14,P:15,Q:16,R:17,S:18,T:19,U:20,V:21,W:22,X:23,Y:24,Z:25 };
@@ -295,18 +389,19 @@ const createServer = () => {
     }
     const expectedCheck = String.fromCharCode(65 + (sum % 26));
     const valid = clean[15] === expectedCheck;
-    return { content: [{ type: "text", text: JSON.stringify({ valid, codice_fiscale: clean }) }] };
+    const r = { valid, codice_fiscale: clean };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 13. Validate Italian Partita IVA ──
   server.registerTool("validate_partita_iva", {
-    description: "Validates an Italian Partita IVA (VAT number for companies and self-employed) — an 11-digit number issued by the Italian Revenue Agency. Applies the official Luhn-variant checksum algorithm used by Italian tax authorities. Returns { valid: boolean, partita_iva: string } or { valid: false, reason: string }. Use when processing Italian B2B invoices, validating Italian suppliers, or any Italian business compliance workflow.",
+    description: "Validates an Italian Partita IVA (VAT number for companies and self-employed) — an 11-digit number issued by the Italian Revenue Agency. Applies the official Luhn-variant checksum algorithm used by Italian tax authorities. Returns { valid: boolean, partita_iva: string } or { valid: false, reason: string }. Use when processing Italian B2B invoices via SDI, validating Italian suppliers, or any Italian business compliance workflow requiring a verified VAT-registered entity.",
     inputSchema: { partita_iva: z.string().describe("11-digit Italian Partita IVA, with or without spaces. Example: '12345670017'") },
     outputSchema: { valid: z.boolean(), partita_iva: z.string().optional(), reason: z.string().optional() },
-        annotations: { title: "Validate Italian Partita IVA", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate Italian Partita IVA", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ partita_iva }) => {
     const clean = partita_iva.replace(/\s/g, "");
-    if (!/^\d{11}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "Partita IVA must have exactly 11 digits" }) }] };
+    if (!/^\d{11}$/.test(clean)) { const r = { valid: false, reason: "Partita IVA must have exactly 11 digits" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     let sum = 0;
     for (let i = 0; i < 10; i++) {
       let digit = parseInt(clean[i]);
@@ -314,18 +409,19 @@ const createServer = () => {
       sum += digit;
     }
     const valid = (10 - (sum % 10)) % 10 === parseInt(clean[10]);
-    return { content: [{ type: "text", text: JSON.stringify({ valid, partita_iva: clean }) }] };
+    const r = { valid, partita_iva: clean };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 14. Validate German VAT (USt-IdNr) ──
   server.registerTool("validate_vat_de", {
-    description: "Validates a German VAT identification number (Umsatzsteuer-Identifikationsnummer, USt-IdNr) — format 'DE' followed by 9 digits. Verifies the format and applies the official ISO 7064 MOD-11-10 checksum algorithm. Returns { valid: boolean, vat_number: string, country: 'DE' } or { valid: false, reason: string }. Use when processing German invoices, validating German suppliers for intra-EU transactions, or any B2B workflow involving German companies.",
+    description: "Validates a German VAT identification number (Umsatzsteuer-Identifikationsnummer, USt-IdNr) — format 'DE' followed by 9 digits. Verifies the format and applies the official ISO 7064 MOD-11-10 checksum algorithm. Returns { valid: boolean, vat_number: string, country: 'DE' } or { valid: false, reason: string }. Use when processing German B2B invoices, validating German suppliers for intra-EU reverse charge transactions, or any compliance workflow requiring a verified German VAT registration.",
     inputSchema: { vat_number: z.string().describe("German VAT number with or without spaces. Example: 'DE123456789'") },
     outputSchema: { valid: z.boolean(), vat_number: z.string().optional(), country: z.string().optional(), reason: z.string().optional() },
-        annotations: { title: "Validate German VAT Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate German VAT Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ vat_number }) => {
     const clean = vat_number.replace(/\s/g, "").toUpperCase();
-    if (!/^DE\d{9}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "German VAT must start with DE followed by exactly 9 digits. Example: DE123456789" }) }] };
+    if (!/^DE\d{9}$/.test(clean)) { const r = { valid: false, reason: "German VAT must start with DE followed by exactly 9 digits. Example: DE123456789" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     const digits = clean.substring(2);
     let product = 10;
     for (let i = 0; i < 8; i++) {
@@ -335,23 +431,25 @@ const createServer = () => {
     }
     const checkDigit = 11 - product === 10 ? 0 : 11 - product;
     const valid = checkDigit === parseInt(digits[8]);
-    return { content: [{ type: "text", text: JSON.stringify({ valid, vat_number: clean, country: "DE" }) }] };
+    const r = { valid, vat_number: clean, country: "DE" };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 15. Validate UK VAT Number ──
   server.registerTool("validate_vat_uk", {
-    description: "Validates a UK VAT registration number — format 'GB' followed by 9 digits (standard), 12 digits (branch traders), or 'GD'/'HA' followed by 3 digits (government/health authorities). Applies the official HMRC modulo-97 algorithm for 9-digit numbers. Returns { valid: boolean, vat_number: string, type: string, country: 'GB' }. Use when processing UK invoices, validating UK suppliers post-Brexit, or any B2B workflow involving UK VAT numbers.",
+    description: "Validates a UK VAT registration number — format 'GB' followed by 9 digits (standard), 12 digits (branch traders), or 'GD'/'HA' followed by 3 digits (government departments / health authorities). Applies the official HMRC modulo-97 algorithm with both legacy (mod 97) and current (mod 97 + 55) checksum variants. Returns { valid: boolean, vat_number: string, type: string, country: 'GB' }. Use when processing UK invoices post-Brexit, validating UK suppliers, or any B2B workflow involving UK VAT-registered entities. Recognizes all 4 UK VAT number types.",
     inputSchema: { vat_number: z.string().describe("UK VAT number with or without spaces. Example: 'GB123456789' or '123456789'") },
     outputSchema: { valid: z.boolean(), vat_number: z.string().optional(), type: z.string().optional(), country: z.string().optional(), reason: z.string().optional() },
-        annotations: { title: "Validate UK VAT Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate UK VAT Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ vat_number }) => {
     let clean = vat_number.replace(/\s/g, "").toUpperCase();
     if (!clean.startsWith("GB")) clean = "GB" + clean;
     if (/^GB(GD|HA)\d{3}$/.test(clean)) {
       const type = clean.substring(2, 4) === "GD" ? "Government department" : "Health authority";
-      return { content: [{ type: "text", text: JSON.stringify({ valid: true, vat_number: clean, type, country: "GB" }) }] };
+      const r = { valid: true, vat_number: clean, type, country: "GB" };
+      return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
     }
-    if (!/^GB\d{9}(\d{3})?$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "UK VAT must be GB followed by 9 or 12 digits, or GBGD/GBHA followed by 3 digits" }) }] };
+    if (!/^GB\d{9}(\d{3})?$/.test(clean)) { const r = { valid: false, reason: "UK VAT must be GB followed by 9 or 12 digits, or GBGD/GBHA followed by 3 digits" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     const digits = clean.substring(2, 11);
     const weights = [8, 7, 6, 5, 4, 3, 2];
     let sum = 0;
@@ -360,34 +458,36 @@ const createServer = () => {
     let remainder = sum % 97;
     const valid = (97 - remainder) === checkDigits || (97 - ((sum + 55) % 97)) === checkDigits;
     const type = clean.length === 11 ? "Standard" : "Branch trader";
-    return { content: [{ type: "text", text: JSON.stringify({ valid, vat_number: clean, type, country: "GB" }) }] };
+    const r = { valid, vat_number: clean, type, country: "GB" };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 16. Validate Dutch KVK Number ──
   server.registerTool("validate_kvk_nl", {
-    description: "Validates a Dutch KVK (Kamer van Koophandel) chamber of commerce number — an 8-digit registration number assigned to all businesses registered in the Netherlands. Verifies the format and applies the official weighted checksum algorithm. Returns { valid: boolean, kvk: string, country: 'NL' } or { valid: false, reason: string }. Use when processing Dutch invoices, validating Dutch suppliers, or onboarding Dutch business partners.",
+    description: "Validates a Dutch KVK (Kamer van Koophandel) chamber of commerce number — an 8-digit registration number assigned to all businesses registered in the Netherlands. Verifies the format and applies the official weighted checksum algorithm (weights 8,7,6,5,4,3,2,1, sum modulo 11). Returns { valid: boolean, kvk: string, country: 'NL' } or { valid: false, reason: string }. Use when processing Dutch invoices, validating Dutch suppliers, or onboarding Dutch business partners requiring chamber of commerce verification.",
     inputSchema: { kvk: z.string().describe("8-digit Dutch KVK number, with or without spaces. Example: '12345678'") },
     outputSchema: { valid: z.boolean(), kvk: z.string().optional(), country: z.string().optional(), reason: z.string().optional() },
-        annotations: { title: "Validate Dutch KVK Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate Dutch KVK Number", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ kvk }) => {
     const clean = kvk.replace(/\s/g, "");
-    if (!/^\d{8}$/.test(clean)) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: "KVK number must have exactly 8 digits" }) }] };
+    if (!/^\d{8}$/.test(clean)) { const r = { valid: false, reason: "KVK number must have exactly 8 digits" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     const weights = [8, 7, 6, 5, 4, 3, 2, 1];
     let sum = 0;
     for (let i = 0; i < 8; i++) sum += parseInt(clean[i]) * weights[i];
     const valid = sum % 11 === 0;
-    return { content: [{ type: "text", text: JSON.stringify({ valid, kvk: clean, country: "NL" }) }] };
+    const r = { valid, kvk: clean, country: "NL" };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 17. Validate European Postal Code ──
   server.registerTool("validate_postal_code", {
-    description: "Validates a postal code format for a given European country using the official pattern for that country. Returns { valid: boolean, postal_code: string, country: string, format: string }. Supports PT (4+3 digit), ES (5 digit), FR (5 digit), DE (5 digit), IT (5 digit), NL (4 digits + 2 letters), BE (4 digit), PL (5+2 digit), SE (5 digit), AT (4 digit), IE (Eircode 3+4), GR (5 digit), HU (4 digit), RO (6 digit), UK (complex alphanumeric). Use in e-commerce checkout validation, address verification, or logistics workflows.",
+    description: "Validates a postal code format for a given European country using the official pattern for that country. Returns { valid: boolean, postal_code: string, country: string, format: string }. Supports 16 European countries: PT (4-3 digit), ES (5 digit), FR (5 digit), DE (5 digit), IT (5 digit), NL (4 digits + 2 letters), BE (4 digit), PL (5+2 digit), SE (5 digit), AT (4 digit), IE (Eircode 3+4), GR (5 digit), HU (4 digit), RO (6 digit), UK/GB (complex alphanumeric). Use in e-commerce checkout validation, address verification, or logistics workflows across European markets.",
     inputSchema: {
       postal_code: z.string().describe("Postal code to validate. Example: '1000-001' for PT, '28001' for ES, 'SW1A 1AA' for UK"),
       country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'UK'")
     },
     outputSchema: { valid: z.boolean(), postal_code: z.string().optional(), country: z.string().optional(), format: z.string().optional(), reason: z.string().optional() },
-        annotations: { title: "Validate European Postal Code", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate European Postal Code", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ postal_code, country_code }) => {
     const patterns = {
       PT: { regex: /^\d{4}-\d{3}$/, format: "NNNN-NNN" },
@@ -409,10 +509,11 @@ const createServer = () => {
     };
     const code = country_code.toUpperCase();
     const pattern = patterns[code];
-    if (!pattern) return { content: [{ type: "text", text: JSON.stringify({ valid: false, reason: `Country ${code} not supported. Supported: ${Object.keys(patterns).join(", ")}` }) }] };
+    if (!pattern) { const r = { valid: false, reason: `Country ${code} not supported. Supported: ${Object.keys(patterns).join(", ")}` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     const clean = postal_code.trim().toUpperCase();
     const valid = pattern.regex.test(clean);
-    return { content: [{ type: "text", text: JSON.stringify({ valid, postal_code: clean, country: code, format: pattern.format }) }] };
+    const r = { valid, postal_code: clean, country: code, format: pattern.format };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ════════════════════════════════════════════════
@@ -421,10 +522,10 @@ const createServer = () => {
 
   // ── 18. Get Payment Terms ──
   server.registerTool("get_payment_terms", {
-    description: "Returns the legal B2B payment terms for a given European country — the default payment period, maximum allowed period, and late payment rules as defined by EU Directive 2011/7/EU and local implementations. Returns { country, default_days, max_days, late_payment_interest, notes }. Use when generating invoices, setting payment due dates, or automating accounts receivable workflows. Information provided as reference only — not legal advice.",
+    description: "Returns the legal B2B payment terms for a given European country — the default payment period, maximum allowed period, and late payment rules as defined by EU Directive 2011/7/EU and local implementations. Returns { country, default_days, max_days, late_payment_interest, currency, notes }. Supports 10 countries: PT, ES, FR, DE, IT, NL, BE, UK, SE, PL. Use when generating invoices, setting payment due dates, automating accounts receivable workflows, or building cross-border collection processes. Information provided as reference only — not legal advice.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'FR'") },
     outputSchema: { country: z.string().optional(), default_days: z.number().optional(), max_days: z.number().optional(), late_payment_interest: z.string().optional(), currency: z.string().optional(), notes: z.string().optional(), disclaimer: z.string().optional(), error: z.string().optional() },
-        annotations: { title: "Get B2B Payment Terms", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Get B2B Payment Terms", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const terms = {
       PT: { country: "Portugal", default_days: 30, max_days: 60, late_payment_interest: "ECB rate + 8%", currency: "EUR", notes: "Law 62/2013. Public authorities must pay within 30 days." },
@@ -440,16 +541,17 @@ const createServer = () => {
     };
     const code = country_code.toUpperCase();
     const data = terms[code];
-    if (!data) return { content: [{ type: "text", text: JSON.stringify({ error: `Country ${code} not found. Available: ${Object.keys(terms).join(", ")}`, note: "Information provided as reference only — not legal advice." }) }] };
-    return { content: [{ type: "text", text: JSON.stringify({ ...data, disclaimer: "Reference information only — not legal advice. Verify with a qualified professional." }) }] };
+    if (!data) { const r = { error: `Country ${code} not found. Available: ${Object.keys(terms).join(", ")}` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
+    const r = { ...data, disclaimer: "Reference information only — not legal advice. Verify with a qualified professional." };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 19. Get Invoice Requirements ──
   server.registerTool("get_invoice_requirements", {
-    description: "Returns the mandatory fields required on a valid VAT invoice for a given European country, as defined by EU VAT Directive 2006/112/EC and local implementations. Returns { country, mandatory_fields: [], optional_fields: [], notes }. Use when generating invoices for EU customers, validating invoice templates, or building invoice compliance checks in agent workflows. Information provided as reference only — not legal advice.",
+    description: "Returns the mandatory fields required on a valid VAT invoice for a given European country, as defined by EU VAT Directive 2006/112/EC and local implementations. Returns { country, mandatory_fields: [], optional_fields: [], notes }. Supports 8 countries: PT, ES, FR, DE, IT, NL, BE, UK. Includes country-specific requirements such as ATCUD (Portugal), SDI codice destinatario (Italy), Factur-X / ZUGFeRD (France/Germany), KVK number (Netherlands). Use when generating invoices for EU customers, validating invoice templates, or building invoice compliance checks in agent workflows.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'FR'") },
     outputSchema: { country: z.string().optional(), mandatory_fields: z.array(z.string()).optional(), optional_fields: z.array(z.string()).optional(), notes: z.string().optional(), disclaimer: z.string().optional(), error: z.string().optional() },
-        annotations: { title: "Get Invoice Mandatory Fields", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Get Invoice Mandatory Fields", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const baseFields = [
       "Sequential invoice number",
@@ -476,16 +578,17 @@ const createServer = () => {
     };
     const code = country_code.toUpperCase();
     const data = requirements[code];
-    if (!data) return { content: [{ type: "text", text: JSON.stringify({ error: `Country ${code} not found. Available: ${Object.keys(requirements).join(", ")}`, note: "Reference only — not legal advice." }) }] };
-    return { content: [{ type: "text", text: JSON.stringify({ ...data, disclaimer: "Reference information only — not legal advice. Verify with a qualified professional or tax authority." }) }] };
+    if (!data) { const r = { error: `Country ${code} not found. Available: ${Object.keys(requirements).join(", ")}` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
+    const r = { ...data, disclaimer: "Reference information only — not legal advice. Verify with a qualified professional or tax authority." };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 20. Get VAT Exemption Threshold ──
   server.registerTool("get_vat_exemption_threshold", {
-    description: "Returns the annual turnover threshold below which a business may be exempt from VAT registration in a given European country — the small business VAT exemption scheme. Returns { country, threshold_local_currency, currency, threshold_eur_approx, notes }. Use when determining if a small business needs to register for VAT, or when building onboarding flows for European freelancers and micro-enterprises. Information provided as reference only — not legal advice.",
+    description: "Returns the annual turnover threshold below which a business may be exempt from VAT registration in a given European country — the small business VAT exemption scheme. Returns { country, threshold_local_currency, currency, threshold_eur_approx, regime, notes }. Supports 10 countries: PT, ES, FR, DE, IT, NL, BE, UK, SE, PL. Includes regime names (Regime de isenção PT, Kleinunternehmerregelung DE, Regime forfettario IT, KOR NL, etc). Use when determining if a small business needs to register for VAT, building onboarding flows for European freelancers and micro-enterprises, or providing tax compliance guidance.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'FR'") },
     outputSchema: { country: z.string().optional(), threshold_local_currency: z.number().nullable().optional(), currency: z.string().optional(), threshold_eur_approx: z.number().nullable().optional(), regime: z.string().optional(), notes: z.string().optional(), disclaimer: z.string().optional(), error: z.string().optional() },
-        annotations: { title: "Get VAT Exemption Threshold", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Get VAT Exemption Threshold", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const thresholds = {
       PT: { country: "Portugal", threshold_local_currency: 13500, currency: "EUR", threshold_eur_approx: 13500, regime: "Regime de isenção (Art. 53 CIVA)", notes: "Threshold increased to €13,500 in 2023. Applies to services and goods. Cannot deduct input VAT." },
@@ -501,16 +604,17 @@ const createServer = () => {
     };
     const code = country_code.toUpperCase();
     const data = thresholds[code];
-    if (!data) return { content: [{ type: "text", text: JSON.stringify({ error: `Country ${code} not found. Available: ${Object.keys(thresholds).join(", ")}` }) }] };
-    return { content: [{ type: "text", text: JSON.stringify({ ...data, disclaimer: "Reference information only — not legal advice. Thresholds change annually. Verify with the relevant tax authority." }) }] };
+    if (!data) { const r = { error: `Country ${code} not found. Available: ${Object.keys(thresholds).join(", ")}` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
+    const r = { ...data, disclaimer: "Reference information only — not legal advice. Thresholds change annually. Verify with the relevant tax authority." };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 21. Get E-Invoicing Rules ──
   server.registerTool("get_einvoicing_rules", {
-    description: "Returns the current e-invoicing (electronic invoicing) obligations for a given European country — whether it is mandatory for B2G (business-to-government), B2B (business-to-business), or B2C transactions, the required formats, and implementation timeline. Returns { country, b2g_mandatory, b2b_mandatory, b2c_mandatory, formats, timeline, platform, notes }. Use when building invoice generation systems, determining compliance requirements for EU customers, or automating invoice submission workflows.",
+    description: "Returns the current e-invoicing (electronic invoicing) obligations for a given European country — whether mandatory for B2G, B2B, or B2C transactions, the required formats (FatturaPA, Factur-X, ZUGFeRD, XRechnung, PEPPOL BIS, UBL), and implementation timelines. Returns { country, b2g_mandatory, b2b_mandatory, b2c_mandatory, formats, platform, timeline, notes }. Supports 10 countries: IT, FR, DE, ES, PT, BE, NL, UK, SE, PL. Use when building invoice generation systems, determining compliance requirements for EU customers, or automating invoice submission workflows across Europe.",
     inputSchema: { country_code: z.string().describe("Two-letter ISO country code. Example: 'IT', 'DE', 'FR'") },
     outputSchema: { country: z.string().optional(), b2g_mandatory: z.boolean().optional(), b2b_mandatory: z.boolean().optional(), b2c_mandatory: z.boolean().optional(), formats: z.array(z.string()).optional(), platform: z.string().optional(), timeline: z.string().optional(), notes: z.string().optional(), disclaimer: z.string().optional(), error: z.string().optional() },
-        annotations: { title: "Get E-Invoicing Rules", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Get E-Invoicing Rules", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code }) => {
     const rules = {
       IT: { country: "Italy", b2g_mandatory: true, b2b_mandatory: true, b2c_mandatory: true, formats: ["FatturaPA (XML)", "SDI"], platform: "SDI (Sistema di Interscambio)", timeline: "B2G: 2014. B2B+B2C: January 2019.", notes: "Most advanced e-invoicing system in EU. All invoices must pass through SDI. Codice destinatario required." },
@@ -526,8 +630,9 @@ const createServer = () => {
     };
     const code = country_code.toUpperCase();
     const data = rules[code];
-    if (!data) return { content: [{ type: "text", text: JSON.stringify({ error: `Country ${code} not found. Available: ${Object.keys(rules).join(", ")}` }) }] };
-    return { content: [{ type: "text", text: JSON.stringify({ ...data, disclaimer: "Reference information only. E-invoicing regulations change frequently. Verify with official sources." }) }] };
+    if (!data) { const r = { error: `Country ${code} not found. Available: ${Object.keys(rules).join(", ")}` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
+    const r = { ...data, disclaimer: "Reference information only. E-invoicing regulations change frequently. Verify with official sources." };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ════════════════════════════════════════════════
@@ -536,297 +641,173 @@ const createServer = () => {
 
   // ── 22. Get Public Holidays Range ──
   server.registerTool("get_public_holidays_range", {
-    description: "Returns all public holidays that fall within a given date range for a specified European country. Returns { country, start_date, end_date, total_holidays, holidays: [{date, name, name_en}] }. Supports PT, ES, FR, DE, IT, NL, BE, UK. Use when calculating SLA periods, project timelines, delivery windows, or any workflow that must skip non-working days across multiple European countries.",
+    description: "Returns all public holidays that fall within a given date range for a specified European country, including fixed holidays and Easter-based moveable holidays. Returns { country, start_date, end_date, total_holidays, holidays: [{date, name, name_en}] }. Supports 8 countries: PT, ES, FR, DE, IT, NL, BE, UK. Use when calculating SLA periods, project timelines, delivery windows, or any workflow that must skip non-working days across multiple European countries.",
     inputSchema: {
       country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'FR'"),
       start_date: z.string().describe("Start date in YYYY-MM-DD format. Example: '2026-01-01'"),
       end_date: z.string().describe("End date in YYYY-MM-DD format. Example: '2026-12-31'")
     },
     outputSchema: { country: z.string().optional(), start_date: z.string().optional(), end_date: z.string().optional(), total_holidays: z.number().optional(), holidays: z.array(z.object({ date: z.string(), name: z.string(), name_en: z.string() })).optional(), error: z.string().optional() },
-        annotations: { title: "Get Public Holidays in Date Range", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Get Public Holidays in Date Range", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code, start_date, end_date }) => {
     const start = new Date(start_date), end = new Date(end_date);
-    if (isNaN(start) || isNaN(end)) return { content: [{ type: "text", text: JSON.stringify({ error: "Invalid date format. Use YYYY-MM-DD" }) }] };
+    if (isNaN(start) || isNaN(end)) { const r = { error: "Invalid date format. Use YYYY-MM-DD" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
+    const code = country_code.toUpperCase();
+    const supported = ["PT", "ES", "FR", "DE", "IT", "NL", "BE", "UK"];
+    if (!supported.includes(code)) { const r = { error: `Country ${code} not supported. Supported: ${supported.join(", ")}` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
 
-    const getHolidaysForYear = (country, year) => {
-      const fixed = {
-        PT: [
-          { mmdd: "01-01", name: "Ano Novo", name_en: "New Year's Day" },
-          { mmdd: "04-25", name: "Dia da Liberdade", name_en: "Freedom Day" },
-          { mmdd: "05-01", name: "Dia do Trabalhador", name_en: "Labour Day" },
-          { mmdd: "06-10", name: "Dia de Portugal", name_en: "Portugal Day" },
-          { mmdd: "08-15", name: "Assunção", name_en: "Assumption of Mary" },
-          { mmdd: "10-05", name: "Implantação da República", name_en: "Republic Day" },
-          { mmdd: "11-01", name: "Todos os Santos", name_en: "All Saints Day" },
-          { mmdd: "12-01", name: "Restauração da Independência", name_en: "Independence Day" },
-          { mmdd: "12-08", name: "Imaculada Conceição", name_en: "Immaculate Conception" },
-          { mmdd: "12-25", name: "Natal", name_en: "Christmas Day" },
-        ],
-        ES: [
-          { mmdd: "01-01", name: "Año Nuevo", name_en: "New Year's Day" },
-          { mmdd: "01-06", name: "Epifanía", name_en: "Epiphany" },
-          { mmdd: "05-01", name: "Día del Trabajo", name_en: "Labour Day" },
-          { mmdd: "08-15", name: "Asunción", name_en: "Assumption of Mary" },
-          { mmdd: "10-12", name: "Fiesta Nacional", name_en: "National Day" },
-          { mmdd: "11-01", name: "Todos los Santos", name_en: "All Saints Day" },
-          { mmdd: "12-06", name: "Constitución", name_en: "Constitution Day" },
-          { mmdd: "12-08", name: "Inmaculada Concepción", name_en: "Immaculate Conception" },
-          { mmdd: "12-25", name: "Navidad", name_en: "Christmas Day" },
-        ],
-        DE: [
-          { mmdd: "01-01", name: "Neujahr", name_en: "New Year's Day" },
-          { mmdd: "05-01", name: "Tag der Arbeit", name_en: "Labour Day" },
-          { mmdd: "10-03", name: "Tag der Deutschen Einheit", name_en: "German Unity Day" },
-          { mmdd: "12-25", name: "Erster Weihnachtstag", name_en: "Christmas Day" },
-          { mmdd: "12-26", name: "Zweiter Weihnachtstag", name_en: "Boxing Day" },
-        ],
-        IT: [
-          { mmdd: "01-01", name: "Capodanno", name_en: "New Year's Day" },
-          { mmdd: "01-06", name: "Epifania", name_en: "Epiphany" },
-          { mmdd: "04-25", name: "Festa della Liberazione", name_en: "Liberation Day" },
-          { mmdd: "05-01", name: "Festa del Lavoro", name_en: "Labour Day" },
-          { mmdd: "06-02", name: "Festa della Repubblica", name_en: "Republic Day" },
-          { mmdd: "08-15", name: "Ferragosto", name_en: "Assumption of Mary" },
-          { mmdd: "11-01", name: "Ognissanti", name_en: "All Saints Day" },
-          { mmdd: "12-08", name: "Immacolata Concezione", name_en: "Immaculate Conception" },
-          { mmdd: "12-25", name: "Natale", name_en: "Christmas Day" },
-          { mmdd: "12-26", name: "Santo Stefano", name_en: "St Stephen's Day" },
-        ],
-        NL: [
-          { mmdd: "01-01", name: "Nieuwjaarsdag", name_en: "New Year's Day" },
-          { mmdd: "04-27", name: "Koningsdag", name_en: "King's Day" },
-          { mmdd: "05-05", name: "Bevrijdingsdag", name_en: "Liberation Day" },
-          { mmdd: "12-25", name: "Eerste Kerstdag", name_en: "Christmas Day" },
-          { mmdd: "12-26", name: "Tweede Kerstdag", name_en: "Boxing Day" },
-        ],
-        BE: [
-          { mmdd: "01-01", name: "Jour de l'An", name_en: "New Year's Day" },
-          { mmdd: "05-01", name: "Fête du Travail", name_en: "Labour Day" },
-          { mmdd: "07-21", name: "Fête Nationale", name_en: "National Day" },
-          { mmdd: "08-15", name: "Assomption", name_en: "Assumption of Mary" },
-          { mmdd: "11-01", name: "Toussaint", name_en: "All Saints Day" },
-          { mmdd: "11-11", name: "Armistice", name_en: "Armistice Day" },
-          { mmdd: "12-25", name: "Noël", name_en: "Christmas Day" },
-        ],
-        UK: [
-          { mmdd: "01-01", name: "New Year's Day", name_en: "New Year's Day" },
-          { mmdd: "12-25", name: "Christmas Day", name_en: "Christmas Day" },
-          { mmdd: "12-26", name: "Boxing Day", name_en: "Boxing Day" },
-        ],
-      };
-
-      const countryHolidays = fixed[country] || [];
-      const result = countryHolidays.map(h => ({ date: `${year}-${h.mmdd}`, name: h.name, name_en: h.name_en }));
-
-      // Add Easter-based holidays for FR, DE, NL, BE
-      if (["FR", "DE", "NL", "BE"].includes(country)) {
-        const a = year % 19, b = Math.floor(year / 100), c = year % 100;
-        const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
-        const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
-        const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
-        const m = Math.floor((a + 11 * h + 22 * l) / 451);
-        const month = Math.floor((h + l - 7 * m + 114) / 31);
-        const day = ((h + l - 7 * m + 114) % 31) + 1;
-        const easter = new Date(year, month - 1, day);
-        const addDays = (date, days) => { const dd = new Date(date); dd.setDate(dd.getDate() + days); return dd; };
-        const fmt = (dd) => dd.toISOString().split("T")[0];
-
-        if (country === "FR") {
-          result.push({ date: fmt(addDays(easter, 1)), name: "Lundi de Pâques", name_en: "Easter Monday" });
-          result.push({ date: fmt(addDays(easter, 39)), name: "Ascension", name_en: "Ascension Day" });
-          result.push({ date: fmt(addDays(easter, 50)), name: "Lundi de Pentecôte", name_en: "Whit Monday" });
-        }
-        if (country === "DE") {
-          result.push({ date: fmt(addDays(easter, -2)), name: "Karfreitag", name_en: "Good Friday" });
-          result.push({ date: fmt(addDays(easter, 1)), name: "Ostermontag", name_en: "Easter Monday" });
-          result.push({ date: fmt(addDays(easter, 39)), name: "Himmelfahrt", name_en: "Ascension Day" });
-          result.push({ date: fmt(addDays(easter, 50)), name: "Pfingstmontag", name_en: "Whit Monday" });
-        }
-        if (country === "NL") {
-          result.push({ date: fmt(addDays(easter, -2)), name: "Goede Vrijdag", name_en: "Good Friday" });
-          result.push({ date: fmt(addDays(easter, 1)), name: "Tweede Paasdag", name_en: "Easter Monday" });
-          result.push({ date: fmt(addDays(easter, 39)), name: "Hemelvaartsdag", name_en: "Ascension Day" });
-          result.push({ date: fmt(addDays(easter, 50)), name: "Tweede Pinksterdag", name_en: "Whit Monday" });
-        }
-        if (country === "BE") {
-          result.push({ date: fmt(addDays(easter, 1)), name: "Lundi de Pâques", name_en: "Easter Monday" });
-          result.push({ date: fmt(addDays(easter, 39)), name: "Ascension", name_en: "Ascension Day" });
-          result.push({ date: fmt(addDays(easter, 50)), name: "Lundi de Pentecôte", name_en: "Whit Monday" });
-        }
-      }
-
-      // Add Easter for UK
-      if (country === "UK") {
-        const a = year % 19, b = Math.floor(year / 100), c = year % 100;
-        const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
-        const g = Math.floor((b - f + 1) / 3), hh = (19 * a + b - d - g + 15) % 30;
-        const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - hh - k) % 7;
-        const mm = Math.floor((a + 11 * hh + 22 * l) / 451);
-        const month = Math.floor((hh + l - 7 * mm + 114) / 31);
-        const day = ((hh + l - 7 * mm + 114) % 31) + 1;
-        const easter = new Date(year, month - 1, day);
-        const addDays = (date, days) => { const dd = new Date(date); dd.setDate(dd.getDate() + days); return dd; };
-        const fmt = (dd) => dd.toISOString().split("T")[0];
-        result.push({ date: fmt(addDays(easter, -2)), name: "Good Friday", name_en: "Good Friday" });
-        result.push({ date: fmt(addDays(easter, 1)), name: "Easter Monday", name_en: "Easter Monday" });
-      }
-
-      return result.sort((a, b) => a.date.localeCompare(b.date));
+    const fixedNames = {
+      PT: { "01-01": ["Ano Novo","New Year's Day"], "04-25": ["Dia da Liberdade","Freedom Day"], "05-01": ["Dia do Trabalhador","Labour Day"], "06-10": ["Dia de Portugal","Portugal Day"], "08-15": ["Assunção","Assumption of Mary"], "10-05": ["Implantação da República","Republic Day"], "11-01": ["Todos os Santos","All Saints Day"], "12-01": ["Restauração da Independência","Independence Day"], "12-08": ["Imaculada Conceição","Immaculate Conception"], "12-25": ["Natal","Christmas Day"] },
+      ES: { "01-01": ["Año Nuevo","New Year's Day"], "01-06": ["Epifanía","Epiphany"], "05-01": ["Día del Trabajo","Labour Day"], "08-15": ["Asunción","Assumption of Mary"], "10-12": ["Fiesta Nacional","National Day"], "11-01": ["Todos los Santos","All Saints Day"], "12-06": ["Constitución","Constitution Day"], "12-08": ["Inmaculada Concepción","Immaculate Conception"], "12-25": ["Navidad","Christmas Day"] },
+      FR: { "01-01": ["Jour de l'An","New Year's Day"], "05-01": ["Fête du Travail","Labour Day"], "05-08": ["Victoire 1945","Victory in Europe Day"], "07-14": ["Fête Nationale","Bastille Day"], "08-15": ["Assomption","Assumption of Mary"], "11-01": ["Toussaint","All Saints Day"], "11-11": ["Armistice","Armistice Day"], "12-25": ["Noël","Christmas Day"] },
+      DE: { "01-01": ["Neujahr","New Year's Day"], "05-01": ["Tag der Arbeit","Labour Day"], "10-03": ["Tag der Deutschen Einheit","German Unity Day"], "12-25": ["Erster Weihnachtstag","Christmas Day"], "12-26": ["Zweiter Weihnachtstag","Boxing Day"] },
+      IT: { "01-01": ["Capodanno","New Year's Day"], "01-06": ["Epifania","Epiphany"], "04-25": ["Festa della Liberazione","Liberation Day"], "05-01": ["Festa del Lavoro","Labour Day"], "06-02": ["Festa della Repubblica","Republic Day"], "08-15": ["Ferragosto","Assumption of Mary"], "11-01": ["Ognissanti","All Saints Day"], "12-08": ["Immacolata Concezione","Immaculate Conception"], "12-25": ["Natale","Christmas Day"], "12-26": ["Santo Stefano","St Stephen's Day"] },
+      NL: { "01-01": ["Nieuwjaarsdag","New Year's Day"], "04-27": ["Koningsdag","King's Day"], "05-05": ["Bevrijdingsdag","Liberation Day"], "12-25": ["Eerste Kerstdag","Christmas Day"], "12-26": ["Tweede Kerstdag","Boxing Day"] },
+      BE: { "01-01": ["Jour de l'An","New Year's Day"], "05-01": ["Fête du Travail","Labour Day"], "07-21": ["Fête Nationale","National Day"], "08-15": ["Assomption","Assumption of Mary"], "11-01": ["Toussaint","All Saints Day"], "11-11": ["Armistice","Armistice Day"], "12-25": ["Noël","Christmas Day"] },
+      UK: { "01-01": ["New Year's Day","New Year's Day"], "12-25": ["Christmas Day","Christmas Day"], "12-26": ["Boxing Day","Boxing Day"] },
     };
 
-    const code = country_code.toUpperCase();
-    const supportedCountries = ["PT", "ES", "FR", "DE", "IT", "NL", "BE", "UK"];
-    if (!supportedCountries.includes(code)) {
-      return { content: [{ type: "text", text: JSON.stringify({ error: `Country ${code} not supported. Supported: ${supportedCountries.join(", ")}` }) }] };
-    }
+    const moveableNames = {
+      PT: { offsets: { "-2": ["Sexta-feira Santa","Good Friday"] } },
+      ES: { offsets: { "-2": ["Viernes Santo","Good Friday"] } },
+      FR: { offsets: { "1": ["Lundi de Pâques","Easter Monday"], "39": ["Ascension","Ascension Day"], "50": ["Lundi de Pentecôte","Whit Monday"] } },
+      DE: { offsets: { "-2": ["Karfreitag","Good Friday"], "1": ["Ostermontag","Easter Monday"], "39": ["Himmelfahrt","Ascension Day"], "50": ["Pfingstmontag","Whit Monday"] } },
+      IT: { offsets: { "1": ["Pasquetta","Easter Monday"] } },
+      NL: { offsets: { "-2": ["Goede Vrijdag","Good Friday"], "1": ["Tweede Paasdag","Easter Monday"], "39": ["Hemelvaartsdag","Ascension Day"], "50": ["Tweede Pinksterdag","Whit Monday"] } },
+      BE: { offsets: { "1": ["Lundi de Pâques","Easter Monday"], "39": ["Ascension","Ascension Day"], "50": ["Lundi de Pentecôte","Whit Monday"] } },
+      UK: { offsets: { "-2": ["Good Friday","Good Friday"], "1": ["Easter Monday","Easter Monday"] } },
+    };
 
-    const startYear = start.getFullYear(), endYear = end.getFullYear();
     let allHolidays = [];
-    for (let y = startYear; y <= endYear; y++) allHolidays = allHolidays.concat(getHolidaysForYear(code, y));
+    for (let y = start.getFullYear(); y <= end.getFullYear(); y++) {
+      const fixed = fixedNames[code] || {};
+      for (const [mmdd, names] of Object.entries(fixed)) {
+        allHolidays.push({ date: `${y}-${mmdd}`, name: names[0], name_en: names[1] });
+      }
+      const easter = getEaster(y);
+      const moveable = moveableNames[code]?.offsets || {};
+      for (const [offset, names] of Object.entries(moveable)) {
+        allHolidays.push({ date: fmt(addDays(easter, parseInt(offset))), name: names[0], name_en: names[1] });
+      }
+    }
 
     const filtered = allHolidays.filter(h => {
       const d = new Date(h.date);
       return d >= start && d <= end;
-    });
+    }).sort((a, b) => a.date.localeCompare(b.date));
 
-    return { content: [{ type: "text", text: JSON.stringify({ country: code, start_date, end_date, total_holidays: filtered.length, holidays: filtered }) }] };
+    const r = { country: code, start_date, end_date, total_holidays: filtered.length, holidays: filtered };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 23. Calculate Working Days EU ──
   server.registerTool("calculate_working_days_eu", {
-    description: "Counts the number of working days between two dates (inclusive) for a given European country, excluding weekends and that country's national public holidays. Returns { country, start_date, end_date, working_days, holidays_excluded }. Supports PT, ES, FR, DE, IT, NL, BE, UK. Use when calculating cross-border SLA periods, invoice payment deadlines, or project timelines that must account for different national holiday calendars.",
+    description: "Counts the number of working days between two dates (inclusive) for a given European country, excluding weekends and that country's national public holidays (fixed and Easter-based moveable). Returns { country, start_date, end_date, working_days, holidays_excluded }. Supports 8 countries: PT, ES, FR, DE, IT, NL, BE, UK. Use when calculating cross-border SLA periods, invoice payment deadlines, or project timelines that must account for different national holiday calendars across Europe.",
     inputSchema: {
       country_code: z.string().describe("Two-letter ISO country code. Example: 'DE', 'IT', 'UK'"),
       start_date: z.string().describe("Start date in YYYY-MM-DD format, inclusive. Example: '2026-01-01'"),
       end_date: z.string().describe("End date in YYYY-MM-DD format, inclusive. Example: '2026-01-31'")
     },
     outputSchema: { country: z.string().optional(), start_date: z.string().optional(), end_date: z.string().optional(), working_days: z.number().optional(), holidays_excluded: z.number().optional(), error: z.string().optional() },
-        annotations: { title: "Calculate Working Days (EU Multi-Country)", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Calculate Working Days (EU Multi-Country)", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code, start_date, end_date }) => {
-    const holidaysByCountry = {
-      PT: ["01-01","04-25","05-01","06-10","08-15","10-05","11-01","12-01","12-08","12-25"],
-      ES: ["01-01","01-06","05-01","08-15","10-12","11-01","12-06","12-08","12-25"],
-      DE: ["01-01","05-01","10-03","12-25","12-26"],
-      IT: ["01-01","01-06","04-25","05-01","06-02","08-15","11-01","12-08","12-25","12-26"],
-      NL: ["01-01","04-27","05-05","12-25","12-26"],
-      BE: ["01-01","05-01","07-21","08-15","11-01","11-11","12-25"],
-      UK: ["01-01","12-25","12-26"],
-    };
-
-    const getEasterHolidays = (year, country) => {
-      const a = year % 19, b = Math.floor(year / 100), c = year % 100;
-      const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
-      const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
-      const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
-      const m = Math.floor((a + 11 * h + 22 * l) / 451);
-      const month = Math.floor((h + l - 7 * m + 114) / 31);
-      const day = ((h + l - 7 * m + 114) % 31) + 1;
-      const easter = new Date(year, month - 1, day);
-      const addDays = (date, days) => { const dd = new Date(date); dd.setDate(dd.getDate() + days); return dd; };
-      const fmt = (dd) => dd.toISOString().split("T")[0];
-      const dates = [];
-      if (country === "FR") { dates.push(fmt(addDays(easter, 1)), fmt(addDays(easter, 39)), fmt(addDays(easter, 50))); }
-      if (country === "DE") { dates.push(fmt(addDays(easter, -2)), fmt(addDays(easter, 1)), fmt(addDays(easter, 39)), fmt(addDays(easter, 50))); }
-      if (country === "NL") { dates.push(fmt(addDays(easter, -2)), fmt(addDays(easter, 1)), fmt(addDays(easter, 39)), fmt(addDays(easter, 50))); }
-      if (country === "BE") { dates.push(fmt(addDays(easter, 1)), fmt(addDays(easter, 39)), fmt(addDays(easter, 50))); }
-      if (country === "UK") { dates.push(fmt(addDays(easter, -2)), fmt(addDays(easter, 1))); }
-      return dates;
-    };
-
     const code = country_code.toUpperCase();
-    const supportedCountries = ["PT", "ES", "FR", "DE", "IT", "NL", "BE", "UK"];
-    if (!supportedCountries.includes(code)) return { content: [{ type: "text", text: JSON.stringify({ error: `Country ${code} not supported. Supported: ${supportedCountries.join(", ")}` }) }] };
-
+    const supported = ["PT", "ES", "FR", "DE", "IT", "NL", "BE", "UK"];
+    if (!supported.includes(code)) { const r = { error: `Country ${code} not supported. Supported: ${supported.join(", ")}` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
     const start = new Date(start_date), end = new Date(end_date);
-    if (isNaN(start) || isNaN(end)) return { content: [{ type: "text", text: JSON.stringify({ error: "Invalid date format. Use YYYY-MM-DD" }) }] };
+    if (isNaN(start) || isNaN(end)) { const r = { error: "Invalid date format. Use YYYY-MM-DD" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
 
-    const fixedHolidays = holidaysByCountry[code] || [];
+    const fixed = FIXED_HOLIDAYS[code] || [];
+    const moveableByYear = {};
+    for (let y = start.getFullYear(); y <= end.getFullYear(); y++) moveableByYear[y] = getMoveableHolidayDates(y, code);
+
     let count = 0, holidaysExcluded = 0;
     const current = new Date(start);
 
     while (current <= end) {
       const dow = current.getDay();
       const mmdd = `${String(current.getMonth() + 1).padStart(2, "0")}-${String(current.getDate()).padStart(2, "0")}`;
-      const fullDate = current.toISOString().split("T")[0];
-      const year = current.getFullYear();
-      const easterHolidays = getEasterHolidays(year, code);
-      const isHoliday = fixedHolidays.includes(mmdd) || easterHolidays.includes(fullDate);
+      const fullDate = fmt(current);
+      const isHoliday = fixed.includes(mmdd) || (moveableByYear[current.getFullYear()] || []).includes(fullDate);
       if (dow !== 0 && dow !== 6 && !isHoliday) count++;
       else if (dow !== 0 && dow !== 6 && isHoliday) holidaysExcluded++;
       current.setDate(current.getDate() + 1);
     }
 
-    return { content: [{ type: "text", text: JSON.stringify({ country: code, start_date, end_date, working_days: count, holidays_excluded: holidaysExcluded }) }] };
+    const r = { country: code, start_date, end_date, working_days: count, holidays_excluded: holidaysExcluded };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 24. Get Next Payment Date ──
   server.registerTool("get_next_payment_date", {
-    description: "Calculates the next valid payment date based on a reference date and a payment rule for a given European country, skipping weekends and national public holidays. Supports rules: 'last_working_day_of_month' (salary payment), 'first_working_day_of_month', 'nth_working_day' (e.g. 5th working day), 'next_working_day' (next business day after reference). Returns { country, reference_date, rule, result_date, notes }. Use when scheduling salary payments, invoice due dates, or any automated payment workflow that must avoid non-working days.",
+    description: "Calculates the next valid payment date based on a reference date and a payment rule for a given European country, skipping weekends and national public holidays (fixed and Easter-based). Supports rules: 'last_working_day_of_month' (salary payment), 'first_working_day_of_month', 'nth_working_day' (e.g. 5th working day), 'next_working_day' (next business day after reference). Returns { country, reference_date, rule, n, result_date }. Supports 8 countries: PT, ES, FR, DE, IT, NL, BE, UK. Use when scheduling salary payments, invoice due dates, or any automated payment workflow that must avoid non-working days.",
     inputSchema: {
       country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'FR'"),
       reference_date: z.string().describe("Reference date in YYYY-MM-DD format. Example: '2026-01-31'"),
       rule: z.enum(["last_working_day_of_month", "first_working_day_of_month", "next_working_day", "nth_working_day"]).describe("Payment rule to apply."),
       n: z.number().optional().describe("For nth_working_day rule: which working day of the month. Example: 5 for 5th working day.")
     },
-    outputSchema: { country: z.string().optional(), reference_date: z.string().optional(), rule: z.string().optional(), result_date: z.string().optional(), error: z.string().optional() },
-        annotations: { title: "Get Next Payment Date", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    outputSchema: { country: z.string().optional(), reference_date: z.string().optional(), rule: z.string().optional(), n: z.number().nullable().optional(), result_date: z.string().optional(), error: z.string().optional() },
+    annotations: { title: "Get Next Payment Date", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code, reference_date, rule, n }) => {
-    const holidaysByCountry = {
-      PT: ["01-01","04-25","05-01","06-10","08-15","10-05","11-01","12-01","12-08","12-25"],
-      ES: ["01-01","01-06","05-01","08-15","10-12","11-01","12-06","12-08","12-25"],
-      FR: ["01-01","05-01","05-08","07-14","08-15","11-01","11-11","12-25"],
-      DE: ["01-01","05-01","10-03","12-25","12-26"],
-      IT: ["01-01","01-06","04-25","05-01","06-02","08-15","11-01","12-08","12-25","12-26"],
-      NL: ["01-01","04-27","05-05","12-25","12-26"],
-      BE: ["01-01","05-01","07-21","08-15","11-01","11-11","12-25"],
-      UK: ["01-01","12-25","12-26"],
-    };
-
     const code = country_code.toUpperCase();
-    const fixedHolidays = holidaysByCountry[code] || [];
+    const supported = ["PT", "ES", "FR", "DE", "IT", "NL", "BE", "UK"];
+    if (!supported.includes(code)) { const r = { error: `Country ${code} not supported. Supported: ${supported.join(", ")}` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
+
+    const fixed = FIXED_HOLIDAYS[code] || [];
+    const moveableCache = {};
+    const getMoveable = (y) => {
+      if (!moveableCache[y]) moveableCache[y] = getMoveableHolidayDates(y, code);
+      return moveableCache[y];
+    };
 
     const isWorkingDay = (date) => {
       const dow = date.getDay();
+      if (dow === 0 || dow === 6) return false;
       const mmdd = `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-      return dow !== 0 && dow !== 6 && !fixedHolidays.includes(mmdd);
+      if (fixed.includes(mmdd)) return false;
+      if (getMoveable(date.getFullYear()).includes(fmt(date))) return false;
+      return true;
     };
 
     const ref = new Date(reference_date);
-    if (isNaN(ref)) return { content: [{ type: "text", text: JSON.stringify({ error: "Invalid date format. Use YYYY-MM-DD" }) }] };
+    if (isNaN(ref)) { const r = { error: "Invalid date format. Use YYYY-MM-DD" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
 
     let resultDate;
-
     if (rule === "next_working_day") {
-      const d = new Date(ref);
-      d.setDate(d.getDate() + 1);
+      const d = new Date(ref); d.setDate(d.getDate() + 1);
       while (!isWorkingDay(d)) d.setDate(d.getDate() + 1);
-      resultDate = d.toISOString().split("T")[0];
+      resultDate = fmt(d);
     }
-
     if (rule === "last_working_day_of_month") {
-      const d = new Date(ref.getFullYear(), ref.getMonth() + 1, 0); // last day of month
+      const d = new Date(ref.getFullYear(), ref.getMonth() + 1, 0);
       while (!isWorkingDay(d)) d.setDate(d.getDate() - 1);
-      resultDate = d.toISOString().split("T")[0];
+      resultDate = fmt(d);
     }
-
     if (rule === "first_working_day_of_month") {
       const d = new Date(ref.getFullYear(), ref.getMonth(), 1);
       while (!isWorkingDay(d)) d.setDate(d.getDate() + 1);
-      resultDate = d.toISOString().split("T")[0];
+      resultDate = fmt(d);
     }
-
     if (rule === "nth_working_day") {
-      if (!n || n < 1) return { content: [{ type: "text", text: JSON.stringify({ error: "For nth_working_day rule, provide n >= 1" }) }] };
+      if (!n || n < 1) { const r = { error: "For nth_working_day rule, provide n >= 1" }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
       const d = new Date(ref.getFullYear(), ref.getMonth(), 1);
       let count = 0;
-      while (count < n) {
-        if (isWorkingDay(d)) count++;
-        if (count < n) d.setDate(d.getDate() + 1);
+      let found = false;
+      while (true) {
+        if (isWorkingDay(d)) {
+          count++;
+          if (count === n) { found = true; break; }
+        }
+        d.setDate(d.getDate() + 1);
+        if (d.getMonth() !== ref.getMonth()) break;
       }
-      resultDate = d.toISOString().split("T")[0];
+      if (!found) { const r = { error: `Month does not have ${n} working days` }; return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r }; }
+      resultDate = fmt(d);
     }
 
-    return { content: [{ type: "text", text: JSON.stringify({ country: code, reference_date, rule, n: n || null, result_date: resultDate }) }] };
+    const r = { country: code, reference_date, rule, n: n || null, result_date: resultDate };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ════════════════════════════════════════════════
@@ -835,7 +816,7 @@ const createServer = () => {
 
   // ── 25. Validate Invoice Schema ──
   server.registerTool("validate_invoice_schema", {
-    description: "Validates whether an invoice JSON object contains all mandatory fields required for a valid VAT invoice in a given European country, based on EU VAT Directive 2006/112/EC and local implementations. Returns { valid: boolean, country, missing_fields: [], present_fields: [], warnings: [] }. Use when building invoice generation pipelines, pre-submission validation, or compliance checks in agent workflows. Information is reference only — not legal advice.",
+    description: "Validates whether an invoice JSON object contains all mandatory fields required for a valid VAT invoice in a given European country, based on EU VAT Directive 2006/112/EC and local implementations. Performs structural validation (missing fields), arithmetic checks (total_excl_vat + vat_amount = total_incl_vat, vat_amount = total_excl_vat × vat_rate / 100), and country-specific warnings (Italy SDI codice destinatario, Portugal ATCUD code). Returns { valid: boolean, country, missing_fields: [], present_fields: [], warnings: [] }. Use when building invoice generation pipelines, pre-submission validation, or compliance checks in agent workflows.",
     inputSchema: {
       country_code: z.string().describe("Two-letter ISO country code. Example: 'PT', 'DE', 'IT'"),
       invoice: z.object({
@@ -851,10 +832,12 @@ const createServer = () => {
         total_excl_vat: z.number().optional(),
         total_incl_vat: z.number().optional(),
         currency: z.string().optional(),
+        sdi_code: z.string().optional(),
+        atcud: z.string().optional(),
       }).describe("Invoice object to validate")
     },
     outputSchema: { valid: z.boolean(), country: z.string().optional(), missing_fields: z.array(z.string()).optional(), present_fields: z.array(z.string()).optional(), warnings: z.array(z.string()).optional(), disclaimer: z.string().optional() },
-        annotations: { title: "Validate Invoice Schema", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Validate Invoice Schema", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ country_code, invoice }) => {
     const baseRequired = ["invoice_number", "invoice_date", "supplier_name", "supplier_tax_id", "customer_name", "line_items", "vat_rate", "vat_amount", "total_excl_vat", "total_incl_vat"];
     const countryExtra = {
@@ -890,12 +873,13 @@ const createServer = () => {
     if (code === "IT" && !invoice.sdi_code) warnings.push("Italy: SDI recipient code (codice destinatario) is required for e-invoicing via SDI system");
     if (code === "PT" && !invoice.atcud) warnings.push("Portugal: ATCUD code is mandatory on all invoices since 2023");
 
-    return { content: [{ type: "text", text: JSON.stringify({ valid: missingFields.length === 0, country: code, missing_fields: missingFields, present_fields: presentFields, warnings, disclaimer: "Reference validation only — not legal advice." }) }] };
+    const r = { valid: missingFields.length === 0, country: code, missing_fields: missingFields, present_fields: presentFields, warnings, disclaimer: "Reference validation only — not legal advice." };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 26. Calculate VAT Breakdown ──
   server.registerTool("calculate_vat_breakdown", {
-    description: "Calculates a complete VAT breakdown for a list of invoice line items, grouping amounts by VAT rate and computing totals. Returns { lines_summary, vat_breakdown: [{rate, base_amount, vat_amount}], total_excl_vat, total_vat, total_incl_vat, currency }. Each line item requires { description, quantity, unit_price, vat_rate }. Use when generating invoices, building checkout summaries, or verifying VAT calculations in agent workflows.",
+    description: "Calculates a complete VAT breakdown for a list of invoice line items, grouping amounts by VAT rate and computing totals. Returns { lines_summary, vat_breakdown: [{rate, base_amount, vat_amount}], total_excl_vat, total_vat, total_incl_vat, currency }. Each line item requires { description, quantity, unit_price, vat_rate }. Handles multiple VAT rates per invoice (e.g. mixed standard 23% + reduced 6% items) and rounds to specified decimal places. Use when generating invoices, building checkout summaries, or verifying VAT calculations in agent workflows.",
     inputSchema: {
       lines: z.array(z.object({
         description: z.string().describe("Item description"),
@@ -907,7 +891,7 @@ const createServer = () => {
       round_decimals: z.number().optional().describe("Decimal places for rounding. Defaults to 2")
     },
     outputSchema: { lines_summary: z.array(z.any()), vat_breakdown: z.array(z.object({ rate: z.number(), base_amount: z.number(), vat_amount: z.number() })), total_excl_vat: z.number(), total_vat: z.number(), total_incl_vat: z.number(), currency: z.string() },
-        annotations: { title: "Calculate VAT Breakdown", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Calculate VAT Breakdown", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ lines, currency = "EUR", round_decimals = 2 }) => {
     const round = (n) => Math.round(n * Math.pow(10, round_decimals)) / Math.pow(10, round_decimals);
     const vatGroups = {};
@@ -924,12 +908,13 @@ const createServer = () => {
     const totalExclVat = round(linesSummary.reduce((s, l) => s + l.line_total_excl_vat, 0));
     const totalVat = round(linesSummary.reduce((s, l) => s + l.line_vat, 0));
     const totalInclVat = round(totalExclVat + totalVat);
-    return { content: [{ type: "text", text: JSON.stringify({ lines_summary: linesSummary, vat_breakdown: vatBreakdown, total_excl_vat: totalExclVat, total_vat: totalVat, total_incl_vat: totalInclVat, currency }) }] };
+    const r = { lines_summary: linesSummary, vat_breakdown: vatBreakdown, total_excl_vat: totalExclVat, total_vat: totalVat, total_incl_vat: totalInclVat, currency };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 27. Suggest VAT Treatment ──
   server.registerTool("suggest_vat_treatment", {
-    description: "Suggests the likely VAT treatment for a transaction based on seller country, buyer country, buyer VAT registration status, and goods/services type — covering standard VAT, reverse charge, OSS/IOSS, and zero-rating scenarios under EU VAT rules. Returns { treatment, description, seller_charges_vat, applicable_rate, notes, disclaimer }. Use when building checkout VAT logic, invoice generation, or cross-border EU compliance workflows. For digital services sold to EU consumers, OSS is indicated automatically. Always verify with a tax advisor for real transactions.",
+    description: "Suggests the likely VAT treatment for a transaction based on seller country, buyer country, buyer VAT registration status, and goods/services type — covering standard VAT, reverse charge, OSS/IOSS, and zero-rating scenarios under EU VAT rules. Returns { treatment, description, seller_charges_vat, applicable_rate, notes, disclaimer }. Handles 6 distinct scenarios: domestic, intra-EU B2B reverse charge, intra-EU B2C with OSS for digital services, intra-EU B2C goods with €10,000 threshold, exports to non-EU (zero-rated), imports from non-EU. Post-Brexit UK is treated as third country. Use when building checkout VAT logic, invoice generation, or cross-border EU compliance workflows.",
     inputSchema: {
       seller_country: z.string().describe("Seller's country ISO code. Example: 'PT'"),
       buyer_country: z.string().describe("Buyer's country ISO code. Example: 'DE'"),
@@ -937,7 +922,7 @@ const createServer = () => {
       goods_type: z.enum(["goods", "digital_services", "services"]).describe("Type of supply")
     },
     outputSchema: { treatment: z.string(), description: z.string(), seller_charges_vat: z.boolean(), applicable_rate: z.string(), seller_country: z.string(), buyer_country: z.string(), buyer_is_vat_registered: z.boolean(), goods_type: z.string(), notes: z.string(), disclaimer: z.string() },
-        annotations: { title: "Suggest VAT Treatment", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Suggest VAT Treatment", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ seller_country, buyer_country, buyer_is_vat_registered, goods_type }) => {
     const seller = seller_country.toUpperCase();
     const buyer = buyer_country.toUpperCase();
@@ -984,7 +969,7 @@ const createServer = () => {
       description = "Export outside EU — zero-rated supply";
       sellerChargesVat = false;
       applicableRate = "0% (export)";
-      notes = `Supply to ${buyer} outside EU. Zero-rated export. Seller must retain export documentation. ${buyer === "UK" ? "Post-Brexit: UK is treated as third country." : ""}`;
+      notes = `Supply to ${buyer} outside EU. Zero-rated export. Seller must retain export documentation. ${buyer === "UK" || buyer === "GB" ? "Post-Brexit: UK is treated as third country." : ""}`;
     } else if (!sellerInEU && buyerInEU) {
       treatment = "import_buyer_accounts";
       description = "Import from outside EU — buyer accounts for import VAT";
@@ -999,12 +984,13 @@ const createServer = () => {
       notes = "Neither seller nor buyer is in the EU. EU VAT rules do not apply.";
     }
 
-    return { content: [{ type: "text", text: JSON.stringify({ treatment, description, seller_charges_vat: sellerChargesVat, applicable_rate: applicableRate, seller_country: seller, buyer_country: buyer, buyer_is_vat_registered, goods_type, notes, disclaimer: "Reference information only — not legal or tax advice. Always verify with a qualified tax advisor for real transactions." }) }] };
+    const r = { treatment, description, seller_charges_vat: sellerChargesVat, applicable_rate: applicableRate, seller_country: seller, buyer_country: buyer, buyer_is_vat_registered, goods_type, notes, disclaimer: "Reference information only — not legal or tax advice. Always verify with a qualified tax advisor for real transactions." };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   // ── 28. Calculate VAT Amount ──
   server.registerTool("calculate_vat_amount", {
-    description: "Calculates VAT amounts from either a net (excluding VAT) or gross (including VAT) amount for a given VAT rate. Returns { net_amount, vat_amount, gross_amount, vat_rate, currency }. Use when building pricing tools, invoice calculators, or checkout flows that need to split gross prices into net + VAT components.",
+    description: "Calculates VAT amounts from either a net (excluding VAT) or gross (including VAT) amount for a given VAT rate. Returns { net_amount, vat_amount, gross_amount, vat_rate, currency }. Use when building pricing tools, invoice calculators, or checkout flows that need to split gross prices into net + VAT components. All values rounded to 2 decimal places.",
     inputSchema: {
       amount: z.number().describe("The amount to calculate VAT for"),
       vat_rate: z.number().describe("VAT rate as a percentage. Example: 23 for 23%"),
@@ -1012,7 +998,7 @@ const createServer = () => {
       currency: z.string().optional().describe("Currency code. Example: 'EUR', 'GBP'. Defaults to 'EUR'")
     },
     outputSchema: { net_amount: z.number(), vat_amount: z.number(), gross_amount: z.number(), vat_rate: z.number(), currency: z.string() },
-        annotations: { title: "Calculate VAT Amount", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    annotations: { title: "Calculate VAT Amount", readOnlyHint: true, idempotentHint: true, openWorldHint: false }
   }, async ({ amount, vat_rate, amount_type, currency = "EUR" }) => {
     const round = (n) => Math.round(n * 100) / 100;
     let net, vat, gross;
@@ -1025,29 +1011,30 @@ const createServer = () => {
       net = round(amount / (1 + vat_rate / 100));
       vat = round(gross - net);
     }
-    return { content: [{ type: "text", text: JSON.stringify({ net_amount: net, vat_amount: vat, gross_amount: gross, vat_rate, currency }) }] };
+    const r = { net_amount: net, vat_amount: vat, gross_amount: gross, vat_rate, currency };
+    return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
   });
 
   return server;
 };
 
-// ── Dual Transport: stdio (Glama/local) or HTTP (Railway/production) ──
-// Railway sets MCP_HTTP=true explicitly — Glama does not
+// ════════════════════════════════════════════════
+// DUAL TRANSPORT: stdio (Glama/local) or HTTP (Railway/production)
+// ════════════════════════════════════════════════
+
 const isStdio = process.env.MCP_HTTP !== "true";
 
 if (isStdio) {
-  // Stdio mode — used by Glama safety checks and local MCP clients
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 } else {
-  // HTTP mode — used by Railway, MCPize, Smithery
   const httpServer = http.createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         name: "mcp-europe-business",
-        version: "1.1.0",
+        version: "1.2.0",
         description: "European business compliance suite for AI agents",
         tools_count: 28,
         modules: {
@@ -1058,6 +1045,11 @@ if (isStdio) {
         },
         mcp_endpoint: "/mcp"
       }));
+      return;
+    }
+    if (req.method === "GET" && req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
       return;
     }
     if (req.url === "/mcp") {
@@ -1074,6 +1066,6 @@ if (isStdio) {
 
   const PORT = process.env.PORT || 8080;
   httpServer.listen(PORT, () => {
-    console.log(`MCP Europe Business Suite running on port ${PORT}`);
+    console.log(`MCP Europe Business Suite v1.2.0 running on port ${PORT}`);
   });
 }
